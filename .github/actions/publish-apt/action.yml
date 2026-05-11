@@ -180,35 +180,79 @@ runs:
 
     - name: Publish public key and instructions
       shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        COMPONENT: ${{ inputs.component }}
       run: |
         set -euo pipefail
         cd apt-repo
         cp /tmp/public.gpg ./public.gpg
         cp /tmp/public.key ./public.key
-        if [ ! -f index.html ]; then
-          cat > index.html <<'EOF'
+
+        # Resolve the apt repo's public URL. Custom-domain CNAMEs win;
+        # otherwise we derive the default GitHub Pages URL from the
+        # repository slug.
+        if [ -f CNAME ]; then
+          BASE_URL="https://$(head -n1 CNAME | tr -d '[:space:]')"
+        else
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          BASE_URL="https://${OWNER}.github.io/${REPO}"
+        fi
+
+        # Tell Jekyll not to munge the repo (it would happily delete files
+        # whose names start with '_' on Pages publish).
+        : > .nojekyll
+
+        # Re-emit a friendly landing page on every publish so the install
+        # instructions stay in sync with the current URL and suite.
+        cat > index.html <<EOF
         <!doctype html>
-        <html><head><meta charset="utf-8"><title>hyperv-for-linux apt repository</title></head>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <title>hyperv-for-linux apt repository</title>
+          <style>
+            body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; }
+            pre  { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
+            code { background: #f4f4f4; padding: 0 .2rem; }
+          </style>
+        </head>
         <body>
-        <h1>hyperv-for-linux apt repository</h1>
-        <p>Adds the Microsoft Hypervisor and a matching Hyper-V capable kernel to Ubuntu 26.04.</p>
-        <pre>
+          <h1>hyperv-for-linux apt repository</h1>
+          <p>
+            Adds the Microsoft Hypervisor and a matching Hyper-V capable kernel
+            to Ubuntu. Repo URL: <code>${BASE_URL}</code>
+          </p>
+
+          <h2>Install</h2>
+          <pre>
         # Trust the signing key
         sudo install -d /etc/apt/keyrings
-        curl -fsSL https://<your-pages-host>/public.key \
+        curl -fsSL ${BASE_URL}/public.key \\
           | sudo tee /etc/apt/keyrings/hyperv-for-linux.gpg >/dev/null
 
         # Add the repository
-        echo "deb [signed-by=/etc/apt/keyrings/hyperv-for-linux.gpg] \
-          https://<your-pages-host> stable main" \
+        echo "deb [signed-by=/etc/apt/keyrings/hyperv-for-linux.gpg] \\
+          ${BASE_URL} ${SUITE} ${COMPONENT}" \\
           | sudo tee /etc/apt/sources.list.d/hyperv-for-linux.list
 
         sudo apt-get update
-        sudo apt-get install linux-image-hyperv hyperv
-        </pre>
-        </body></html>
+        sudo apt-get install linux-image-hyperv hyperv</pre>
+
+          <h2>What's in here</h2>
+          <ul>
+            <li><code>linux-image-hyperv</code> — Ubuntu kernel rebuilt with
+                <code>MSHV_ROOT</code> + Hyper-V drivers + EFI loader patch.</li>
+            <li><code>hyperv</code> — Microsoft Hypervisor binaries +
+                firmware, repackaged from
+                <code>packages.microsoft.com/azurelinux/3.0/prod/non-oss/</code>.</li>
+          </ul>
+
+          <p><a href="https://github.com/${GITHUB_REPOSITORY}">Source &amp; build pipelines on GitHub</a></p>
+        </body>
+        </html>
         EOF
-        fi
 
     - name: Commit and push
       shell: bash
