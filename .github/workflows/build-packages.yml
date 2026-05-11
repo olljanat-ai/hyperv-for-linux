@@ -22,6 +22,12 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  # Serialise all writers to the apt repo (gh-pages) so two simultaneous
+  # publishes don't clobber each other.
+  group: apt-repo-publish
+  cancel-in-progress: false
+
 env:
   MS_REPO_URL: "https://packages.microsoft.com/azurelinux/3.0/prod/non-oss/x86_64"
   # RPMs we want to repackage. If Microsoft renames or splits them this list
@@ -176,3 +182,10 @@ jobs:
           path: out/*.deb
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish to apt repository
+        uses: ./.github/actions/publish-apt
+        with:
+          debs_glob: "out/hyperv_*_amd64.deb"
+          gpg_private_key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          gpg_passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
