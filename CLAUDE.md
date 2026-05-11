@@ -92,6 +92,7 @@ Ubuntu codename shifts.
 packaging/
   kernel/
     config.fragment      # CONFIG_* additions merged into Ubuntu kernel config
+    patches/             # <NN>-<subject>.patch files, applied with git am --3way
   hyperv/
     debian/control.in    # reference Debian source-package control file
     scripts/             # postinst / postrm loader registration helpers
@@ -149,13 +150,15 @@ to the repo root on `gh-pages` as `public.key` / `public.gpg`.
   - `CONFIG_HYPERV_VTL_MODE=y` (where the tree exposes it)
   - all standard Hyper-V netvsc / storvsc / balloon / utils drivers
   - VFIO + intel/amd IOMMU on by default
-- **Mandatory patch**: `git am --3way`
-  `olljanat/linux@4266b001` ("efi: Support Microsoft Hypervisor Loader")
-  on top of the Ubuntu tree, applied **before** the config seed/merge.
-  Without it the EFI stub cannot hand off to `hvloader.efi`, so the
-  resulting kernel can't actually boot under Microsoft Hypervisor. This
-  is required, not optional. The 3-way merge handles minor drift between
-  Ubuntu's patched files and the patch's expected context.
+- **Vendored patches**: every file under `packaging/kernel/patches/`
+  matching `*.patch` is applied on top of the Ubuntu tree with
+  `git am --3way`, in lexical order, **before** the config seed/merge.
+  Today that's just `0001-efi-Support-Microsoft-Hypervisor-Loader.patch`
+  (cherry-picked from `olljanat/linux@4266b001`); without it the EFI
+  stub cannot hand off to `hvloader.efi`, so the resulting kernel can't
+  actually boot under Microsoft Hypervisor. New patches go in the same
+  directory using the `<NN>-<subject>.patch` naming convention; the
+  workflow auto-discovers them.
 - Build with `make bindeb-pkg LOCALVERSION=-hyperv KDEB_PKGVERSION=
   <ubuntu-source-version>+hyperv1` so the `.deb` is named
   `linux-image-X.Y.Z-hyperv` and its version sorts above the stock
@@ -174,6 +177,28 @@ to the repo root on `gh-pages` as `public.key` / `public.gpg`.
   publish, automatically.
 - `workflow_dispatch` accepts a `force: true` input to override the
   dedupe check (useful when iterating on the patch or config fragment).
+
+## When a vendored patch stops applying
+
+Ubuntu's tree drifts. When `git am --3way` of a `packaging/kernel/
+patches/*.patch` fails against a freshly-published Ubuntu kernel, the
+workflow:
+
+1. Captures the `git am` output, every `.rej` file, and the conflicting
+   patch under `patch-logs/git-am.log`, uploaded as the
+   `patch-logs-<series>-<version>` workflow artifact.
+2. Opens a GitHub issue titled `kernel: patch <name> fails on Ubuntu
+   <series> linux <version>` with the tail of the log inline. The issue
+   is labelled `kernel-patch-fail` and `automated`.
+3. On subsequent scheduled runs that hit the same failure, it finds the
+   existing open issue by exact title match and adds a comment with the
+   new run URL instead of opening a duplicate.
+
+Resolving the failure is manual: pull down the source as the workflow
+sees it, refresh the offending patch with `git am --reject` +
+`wiggle` / hand-edit, replace the file under `packaging/kernel/patches/`,
+and close the issue. The next scheduled run will pick up the new patch
+and (if it applies) tag + publish a fresh `linux-image-hyperv` deb.
 
 ## `hyperv` package conventions
 
