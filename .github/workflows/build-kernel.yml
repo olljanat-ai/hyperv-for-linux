@@ -98,6 +98,24 @@ for r in data["releases"]:
           tar -xf "linux-${VER}.tar.xz"
           mv "linux-${VER}" linux
 
+      - name: Apply mandatory MSHV EFI loader patch
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          # "efi: Support Microsoft Hypervisor Loader" — required for the
+          # kernel to be launched by hvloader.efi. Without this the booted
+          # kernel cannot hand control to / receive control from the
+          # Microsoft Hypervisor and the entire stack is non-functional.
+          # Source: https://github.com/olljanat/linux/commit/4266b0011469b4cc7efd436c76861f2e9f8adbc1
+          PATCH_URL="https://github.com/olljanat/linux/commit/4266b0011469b4cc7efd436c76861f2e9f8adbc1.patch"
+          wget -q -O ../mshv-efi-loader.patch "$PATCH_URL"
+          git init -q .
+          git config user.email "ci@example.invalid"
+          git config user.name  "ci"
+          git add -A
+          git commit -q -m "base ${{ steps.kver.outputs.version }}"
+          git am --3way ../mshv-efi-loader.patch
+
       - name: Seed config from Ubuntu defaults
         working-directory: linux
         run: |
