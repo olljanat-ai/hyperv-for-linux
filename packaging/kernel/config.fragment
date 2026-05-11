@@ -1,0 +1,53 @@
+# Kernel config fragment merged into Ubuntu's default kernel config to
+# produce a Hyper-V host capable kernel for Ubuntu 26.04.
+#
+# Anything in this file overrides the matching option in the base config.
+# Merge with: scripts/kconfig/merge_config.sh -m .config config.fragment
+
+# --- Microsoft Hypervisor root partition (Hyper-V as the host) -----------
+# Enables /dev/mshv and the root-partition control plane used by
+# Cloud Hypervisor and OpenVMM.
+CONFIG_MSHV_ROOT=m
+
+# --- Hyper-V common bits -------------------------------------------------
+CONFIG_HYPERV=y
+CONFIG_HYPERV_VSOCKETS=y
+CONFIG_HYPERV_TIMER=y
+CONFIG_HYPERV_UTILS=m
+CONFIG_HYPERV_BALLOON=m
+CONFIG_HYPERV_KEYBOARD=m
+CONFIG_HYPERV_NET=m
+CONFIG_HYPERV_STORAGE=m
+CONFIG_HYPERV_IOMMU=y
+CONFIG_DRM_HYPERV=m
+CONFIG_FB_HYPERV=m
+CONFIG_PCI_HYPERV=m
+CONFIG_PCI_HYPERV_INTERFACE=m
+
+# --- VTL / paravisor support --------------------------------------------
+# Needed when running OpenHCL paravisor / VTL2 workloads.
+CONFIG_HYPERV_VTL_MODE=y
+
+# --- KVM (kept on so the same kernel can host KVM guests too) -----------
+CONFIG_KVM=m
+CONFIG_KVM_INTEL=m
+CONFIG_KVM_AMD=m
+
+# --- VFIO (device passthrough to guests) ---------------------------------
+CONFIG_VFIO=m
+CONFIG_VFIO_PCI=m
+CONFIG_VFIO_IOMMU_TYPE1=m
+
+# --- IOMMU (required for safe device passthrough) -----------------------
+CONFIG_INTEL_IOMMU=y
+CONFIG_INTEL_IOMMU_DEFAULT_ON=y
+CONFIG_AMD_IOMMU=y
+
+# --- vhost (used by Cloud Hypervisor / OpenVMM for virtio offload) ------
+CONFIG_VHOST=m
+CONFIG_VHOST_NET=m
+CONFIG_VHOST_VSOCK=m
+
+# --- Debug / observability (cheap and useful in early bring-up) --------
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_DEBUG_INFO_BTF=y

@@ -1,0 +1,179 @@
+name: Build Hyper-V kernel (Ubuntu 26.04)
+
+# Builds an Ubuntu 26.04 kernel with the MSHV root-partition driver and the
+# rest of the Hyper-V host bits enabled, then publishes the resulting
+# linux-image / linux-headers .deb files as workflow artifacts (and as a
+# GitHub Release when run from a tag).
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "Upstream stable kernel version (e.g. 6.14.5). Leave empty to use Ubuntu's archive source."
+        required: false
+        default: ""
+      flavour:
+        description: "Local version suffix appended to the kernel (used as the package flavour)."
+        required: false
+        default: "hyperv"
+  push:
+    paths:
+      - ".github/workflows/build-kernel.yml"
+      - "packaging/kernel/**"
+  schedule:
+    # Rebuild weekly so security fixes from upstream stable get picked up.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      KDEB_PKGVERSION_SUFFIX: hyperv
+      FLAVOUR: ${{ github.event.inputs.flavour || 'hyperv' }}
+      KERNEL_VERSION: ${{ github.event.inputs.kernel_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc kmod cpio flex bison libncurses-dev \
+            libelf-dev libssl-dev libdw-dev libudev-dev \
+            dwarves zstd rsync ccache fakeroot devscripts \
+            dpkg-dev debhelper python3 wget xz-utils git
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=5G
+          echo "PATH=/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-kernel-${{ env.FLAVOUR }}-${{ hashFiles('packaging/kernel/config.fragment') }}
+          restore-keys: |
+            ccache-kernel-${{ env.FLAVOUR }}-
+            ccache-kernel-
+
+      - name: Resolve kernel version
+        id: kver
+        run: |
+          set -euo pipefail
+          if [ -n "${KERNEL_VERSION}" ]; then
+            VER="${KERNEL_VERSION}"
+          else
+            # Pick the latest stable from kernel.org. The mainline JSON has a
+            # 'releases' array with 'moniker' and 'version' fields.
+            VER="$(wget -qO- https://www.kernel.org/releases.json \
+              | python3 -c 'import json,sys
+data=json.load(sys.stdin)
+for r in data["releases"]:
+  if r["moniker"]=="stable":
+    print(r["version"]); break')"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Building kernel ${VER}"
+
+      - name: Fetch kernel source
+        run: |
+          set -euo pipefail
+          VER="${{ steps.kver.outputs.version }}"
+          MAJOR="${VER%%.*}"
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${VER}.tar.xz"
+          tar -xf "linux-${VER}.tar.xz"
+          mv "linux-${VER}" linux
+
+      - name: Seed config from Ubuntu defaults
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          # Start from a sane Ubuntu-like baseline. If we can grab the
+          # current Ubuntu generic config from the archive use it, else fall
+          # back to the in-tree defconfig.
+          if wget -q -O /tmp/ubuntu.config \
+            "https://kernel.ubuntu.com/~kernel-ppa/configs/questing/linux/amd64-config.flavour.generic"; then
+            cp /tmp/ubuntu.config .config
+          else
+            make x86_64_defconfig
+          fi
+          # Some Ubuntu configs reference module signing / cert files we
+          # don't have. Strip those so the build doesn't fail.
+          scripts/config --disable MODULE_SIG \
+                         --disable MODULE_SIG_ALL \
+                         --disable SYSTEM_TRUSTED_KEYS \
+                         --disable SYSTEM_REVOCATION_KEYS \
+                         --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
+                         --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+
+      - name: Merge Hyper-V config fragment
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          ./scripts/kconfig/merge_config.sh -m .config \
+            ../packaging/kernel/config.fragment
+          # Resolve any new symbols non-interactively, defaulting to module/no.
+          make olddefconfig
+          # Verify the critical knobs actually ended up set.
+          for sym in CONFIG_HYPERV CONFIG_MSHV_ROOT CONFIG_HYPERV_VSOCKETS; do
+            if ! grep -qE "^${sym}=[ym]" .config; then
+              echo "::error::${sym} not enabled after merge — kernel ${{ steps.kver.outputs.version }} probably lacks it."
+              grep "${sym}" .config || true
+              exit 1
+            fi
+          done
+
+      - name: Set kernel local version
+        working-directory: linux
+        run: |
+          echo "-${FLAVOUR}" > .scmversion
+          scripts/config --set-str LOCALVERSION "-${FLAVOUR}"
+
+      - name: Build .deb packages
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          # bindeb-pkg produces linux-image / linux-headers / linux-libc-dev
+          # .debs in the parent directory.
+          make -j"$(nproc)" bindeb-pkg \
+            KDEB_PKGVERSION="$(make -s kernelversion)-1${FLAVOUR}" \
+            LOCALVERSION="-${FLAVOUR}"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          mv linux-*.deb out/ || true
+          ls -lh out/
+
+      - name: ccache stats
+        run: ccache -s || true
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-26.04-hyperv-kernel-${{ steps.kver.outputs.version }}
+          path: out/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.deb
+          generate_release_notes: true
