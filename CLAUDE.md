@@ -125,30 +125,55 @@ to the repo root on `gh-pages` as `public.key` / `public.gpg`.
 
 ## Kernel build conventions
 
-- Source: upstream stable from `cdn.kernel.org` (latest `stable` moniker
-  from `releases.json`). Switching to Ubuntu's questing tree is an open
-  item – the EFI loader patch hunks would need re-validating.
-- Seed config from
-  `kernel.ubuntu.com/~kernel-ppa/configs/questing/linux/amd64-config.flavour.generic`
-  with module signing, trusted keys, and revocation keys stripped (we
-  don't have those keys in CI).
+- **Source: Ubuntu archive, not upstream kernel.org.** The workflow runs
+  inside an `ubuntu:latest` container (override with the `ubuntu_image`
+  input — e.g. `ubuntu:rolling`, `ubuntu:questing`), enables `deb-src`,
+  runs `apt-get source linux`, and builds from the resulting tree which
+  already has all Ubuntu quilt patches applied. This means our kernel
+  tracks Ubuntu's CVE/HWE revisions instead of plain mainline.
+- Container codename is read at runtime from `/etc/os-release`
+  (`UBUNTU_CODENAME`) and used as the series identifier in tags and
+  artifact names. There is no hard-coded codename anywhere — switching
+  to a future Ubuntu release is just `ubuntu_image: ubuntu:<codename>`.
+- Seed config from the Ubuntu source tree itself
+  (`debian.master/config/amd64/config.flavour.generic`, falling back to
+  `debian/config/...` or `x86_64_defconfig`). Strip module signing /
+  trusted-keys / revocation-keys options — we don't have those keys in
+  CI.
 - Apply `packaging/kernel/config.fragment` on top using
   `scripts/kconfig/merge_config.sh`, then `make olddefconfig`. Required
-  symbols (verified to be set after merge):
+  symbols (verified to be set after merge, build aborts if not):
   - `CONFIG_HYPERV=y`
   - `CONFIG_HYPERV_VSOCKETS=y`
   - `CONFIG_MSHV_ROOT=m`
   - `CONFIG_HYPERV_VTL_MODE=y` (where the tree exposes it)
   - all standard Hyper-V netvsc / storvsc / balloon / utils drivers
   - VFIO + intel/amd IOMMU on by default
-- **Mandatory patch**: `git am` `olljanat/linux@4266b001` ("efi: Support
-  Microsoft Hypervisor Loader") on top of the source tree, applied
-  **before** `make olddefconfig`. Without it the EFI stub cannot hand off
-  to `hvloader.efi`, so the resulting kernel can't actually boot under
-  Microsoft Hypervisor. This is required, not optional.
-- Build with `make bindeb-pkg KDEB_PKGVERSION=...` and
-  `LOCALVERSION=-hyperv` so the `.deb` is named `linux-image-X.Y.Z-hyperv`
-  and coexists cleanly with the stock Ubuntu kernel.
+- **Mandatory patch**: `git am --3way`
+  `olljanat/linux@4266b001` ("efi: Support Microsoft Hypervisor Loader")
+  on top of the Ubuntu tree, applied **before** the config seed/merge.
+  Without it the EFI stub cannot hand off to `hvloader.efi`, so the
+  resulting kernel can't actually boot under Microsoft Hypervisor. This
+  is required, not optional. The 3-way merge handles minor drift between
+  Ubuntu's patched files and the patch's expected context.
+- Build with `make bindeb-pkg LOCALVERSION=-hyperv KDEB_PKGVERSION=
+  <ubuntu-source-version>+hyperv1` so the `.deb` is named
+  `linux-image-X.Y.Z-hyperv` and its version sorts above the stock
+  Ubuntu kernel of the same release.
+
+## Auto-rebuild on new Ubuntu kernel
+
+- The kernel workflow runs on `schedule: 0 */6 * * *` (every 6 hours).
+- Each run runs `apt-cache showsrc linux` to find the current version of
+  the `linux` source package in the container's series and computes a
+  dedupe tag `kernel/<series>/<sanitised-version>`.
+- If the tag already exists (locally or on the remote) the run exits
+  early without building. Otherwise it builds, publishes to the apt
+  repo, then pushes the tag — so the *next* scheduled run will see the
+  tag and skip again. Net effect: one build per new Ubuntu kernel
+  publish, automatically.
+- `workflow_dispatch` accepts a `force: true` input to override the
+  dedupe check (useful when iterating on the patch or config fragment).
 
 ## `hyperv` package conventions
 
