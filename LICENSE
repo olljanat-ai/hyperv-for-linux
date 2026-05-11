@@ -1,21 +1,99 @@
-MIT License
+hyperv-for-linux — licensing
+============================
 
-Copyright (c) 2026 olljanat-ai
+This repository contains three categories of material with different
+licensing. Reading this file does not constitute legal advice; if in
+doubt, consult the upstream licenses directly.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Scripts, workflows and packaging metadata in this repository
+---------------------------------------------------------------
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Everything authored in this repository (the GitHub Actions workflows
+under .github/, the composite action under .github/actions/, the shell
+scripts under packaging/hyperv/scripts/ and scripts/, the kernel config
+fragment under packaging/kernel/config.fragment, and the Debian control
+templates) is offered under the MIT License:
+
+    MIT License
+
+    Copyright (c) 2026 olljanat-ai
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+
+2. The Linux kernel and the vendored kernel patch
+-------------------------------------------------
+
+The build workflow fetches the Linux kernel source from the Ubuntu
+archive and produces a modified kernel binary. The Linux kernel is NOT
+licensed under MIT — it is published primarily under the
+GNU General Public License v2.0 (GPL-2.0-only), with individual files
+under compatible licenses (notably some user-space-facing headers
+under "GPL-2.0 WITH Linux-syscall-note" and a handful of files under
+dual licenses). See COPYING and the SPDX tags in the kernel source
+tree for the authoritative per-file licensing.
+
+The vendored patch under packaging/kernel/patches/ is a derivative
+work of the Linux kernel and is therefore licensed under the same
+terms as the files it modifies (GPL-2.0-only), as indicated by its
+own SPDX header (`// SPDX-License-Identifier: GPL-2.0-only`). The MIT
+license above does NOT cover that patch and does NOT cover the
+resulting `linux-image-hyperv` binary package.
+
+If you redistribute the built `linux-image-hyperv` .deb you must
+comply with the GPL — in particular, you must make the corresponding
+source code available to your downstream recipients.
+
+
+3. The Microsoft Hypervisor and firmware binaries
+-------------------------------------------------
+
+The `hyperv` package is built by repackaging closed-source binaries
+that Microsoft publishes at:
+
+    https://packages.microsoft.com/azurelinux/3.0/prod/non-oss/
+
+These binaries (hypervisor loader, supporting payload, firmware blobs)
+are Microsoft proprietary software. They are NOT covered by the MIT
+license above and NOT covered by the GPL. Use of those binaries is
+governed by Microsoft's own license terms, which travel with the
+upstream Azure Linux package metadata (look for "License:" in the
+upstream RPM headers, and follow any links to a EULA referenced
+there).
+
+By installing the `hyperv` package you are accepting Microsoft's
+license terms for those binaries. This repository merely repackages
+the bits into a Debian-installable form; it does not grant you any
+additional rights to the binaries, and it does not waive any of
+Microsoft's restrictions.
+
+If you cannot or do not wish to accept Microsoft's terms, do not
+install the `hyperv` package. The `linux-image-hyperv` kernel package
+is independently useful and can be installed on its own.
+
+
+4. Build-time third-party dependencies
+--------------------------------------
+
+The workflows pull in standard Ubuntu packages (build-essential, gcc,
+make, etc.), GitHub Actions (actions/checkout, actions/cache,
+actions/upload-artifact, actions/github-script), and the Microsoft
+RPM payload listed above. Each of those carries its own license; no
+part of this repository attempts to relicense them.
