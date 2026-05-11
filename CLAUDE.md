@@ -76,6 +76,12 @@ ad-hoc should land there, not in undocumented local scripts.
   - `CONFIG_MSHV_ROOT=m`
   - `CONFIG_HYPERV_VTL_MODE=y` (where applicable)
   - all standard Hyper-V netvsc / storvsc / balloon / utils drivers
+- **Mandatory patch**: cherry-pick `olljanat/linux@4266b001` ("efi: Support
+  Microsoft Hypervisor Loader") on top of the source tree. Without this the
+  EFI stub cannot hand off to / receive control from `hvloader.efi` and the
+  resulting kernel will not boot under Microsoft Hypervisor. This must be
+  applied **before** `make olddefconfig`; the patch adds new Kconfig symbols
+  the merge needs to see.
 - Package with `make bindeb-pkg` and rename the package flavour to `hyperv`
   (e.g. `linux-image-6.x.y-hyperv_*.deb`) so it can coexist with the stock
   Ubuntu kernel.
