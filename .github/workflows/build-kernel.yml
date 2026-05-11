@@ -27,6 +27,12 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  # Serialise all writers to the apt repo (gh-pages) so two simultaneous
+  # publishes don't clobber each other.
+  group: apt-repo-publish
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -189,9 +195,12 @@ for r in data["releases"]:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish release (tag builds only)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - name: Publish to apt repository
+        # Only publish the runnable kernel image; ship headers/libc-dev as
+        # workflow artifacts only — they bloat the repo and aren't part of
+        # the "two packages" deliverable.
+        uses: ./.github/actions/publish-apt
         with:
-          files: out/*.deb
-          generate_release_notes: true
+          debs_glob: "out/linux-image-*-${{ env.FLAVOUR }}_*_amd64.deb"
+          gpg_private_key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          gpg_passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
