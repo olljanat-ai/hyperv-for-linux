@@ -13,8 +13,17 @@ Motivation and background:
 
 ## What you get
 
-A signed Ubuntu apt repository, hosted on this repo's `gh-pages` branch
-via GitHub Pages, exposing exactly two packages:
+**A signed Ubuntu apt repository, hosted entirely on GitHub** — the
+repo's `gh-pages` branch is served by GitHub Pages at
+`https://<owner>.github.io/<repo>/`. Source, build pipelines, signing
+key (private half as a secret, public half published alongside the
+metadata), and the apt indexes all live in this same GitHub repository.
+
+For `olljanat-ai/hyperv-for-linux` the public URL is
+**`https://olljanat-ai.github.io/hyperv-for-linux/`**. Substitute your
+own fork's owner/name below if you re-host.
+
+Two packages:
 
 | Package              | Contents                                                  |
 | -------------------- | --------------------------------------------------------- |
@@ -24,14 +33,15 @@ via GitHub Pages, exposing exactly two packages:
 ## Installing
 
 ```bash
+REPO_URL="https://olljanat-ai.github.io/hyperv-for-linux"   # change for your fork
+
 # Trust the signing key
 sudo install -d /etc/apt/keyrings
-curl -fsSL https://<your-pages-host>/public.key \
+curl -fsSL "$REPO_URL/public.key" \
   | sudo tee /etc/apt/keyrings/hyperv-for-linux.gpg >/dev/null
 
 # Add the repository
-echo "deb [signed-by=/etc/apt/keyrings/hyperv-for-linux.gpg] \
-  https://<your-pages-host> stable main" \
+echo "deb [signed-by=/etc/apt/keyrings/hyperv-for-linux.gpg] $REPO_URL stable main" \
   | sudo tee /etc/apt/sources.list.d/hyperv-for-linux.list
 
 sudo apt-get update
@@ -118,22 +128,100 @@ packaging/
   hyperv/
     debian/control.in      # Reference Debian source-package control
     scripts/               # postinst / postrm loader registration
+scripts/
+  generate-signing-key.sh  # One-shot apt-repo signing-key generator
 README.md
 CLAUDE.md                  # Detailed engineering conventions
 ```
 
+The published apt repo lives on the `gh-pages` branch with this layout:
+
+```
+public.key, public.gpg     # apt-repo signing key (public half)
+index.html                 # human-readable landing page (auto-generated)
+.nojekyll                  # tell Pages not to mangle the tree
+dists/stable/
+  InRelease                # inline-signed
+  Release, Release.gpg     # detached-signed
+  main/binary-amd64/{Packages,Packages.gz,Release}
+pool/main/
+  l/linux-image-hyperv/*.deb
+  h/hyperv/*.deb
+```
+
 ## Setup (one-time, repo owner)
 
-The build workflows are self-contained, but publishing the apt repo
-needs two repository secrets and GitHub Pages enabled:
+Everything is hosted on GitHub; you just need to (a) give the workflows
+a signing key and (b) point GitHub Pages at the branch the workflows
+write to.
 
-| Secret                | Purpose                                                  |
-| --------------------- | -------------------------------------------------------- |
-| `APT_GPG_PRIVATE_KEY` | ASCII-armored GPG private key used to sign `Release`.   |
-| `APT_GPG_PASSPHRASE`  | Passphrase for the key (empty string if unprotected).    |
+### 1. Generate the signing key
 
-Then in **Settings → Pages**, set the source to branch `gh-pages` /
-`/ (root)`. The first successful publish creates the branch.
+A helper script is included:
+
+```bash
+# Make sure you've authenticated gh against this repo first.
+gh auth status
+gh repo set-default
+
+# Generate a fresh key and upload it to repository secrets in one shot.
+./scripts/generate-signing-key.sh
+```
+
+This:
+
+- Creates an RSA-4096 key in a throwaway `GNUPGHOME` (no passphrase, no
+  pollution of your real keyring).
+- Uploads the ASCII-armored private half to the
+  `APT_GPG_PRIVATE_KEY` repository secret via `gh secret set`.
+- Sets `APT_GPG_PASSPHRASE` to the empty string.
+- Prints the public key. You can ignore it — the publish workflow
+  re-exports it to `<pages-url>/public.key` on every run.
+
+If you'd rather do it manually:
+
+```bash
+# Generate the key (interactive prompts)
+gpg --full-generate-key            # pick RSA 4096, never expires, no passphrase
+
+KEY_ID=<the_id_gpg_printed>
+gpg --armor --export-secret-keys "$KEY_ID" > private.asc
+
+# Push to repo secrets
+gh secret set APT_GPG_PRIVATE_KEY < private.asc
+gh secret set APT_GPG_PASSPHRASE  --body ""
+
+# Wipe the private key from disk
+shred -u private.asc
+```
+
+If your key has a passphrase, put it in `APT_GPG_PASSPHRASE` instead of
+the empty string and the workflow will pass it through to `gpg --batch
+--passphrase`.
+
+The two secrets the workflows read:
+
+| Secret                | Purpose                                                |
+| --------------------- | ------------------------------------------------------ |
+| `APT_GPG_PRIVATE_KEY` | ASCII-armored GPG private key used to sign `Release`. |
+| `APT_GPG_PASSPHRASE`  | Passphrase, empty string if unprotected.               |
+
+### 2. Enable GitHub Pages
+
+In **Settings → Pages**, set the source to branch `gh-pages` /
+`/ (root)`. The branch doesn't exist yet — the first successful run of
+either build workflow creates it. After that the apt repo is live at
+`https://<owner>.github.io/<repo>/`.
+
+(If you want a custom domain, drop a `CNAME` file into the `gh-pages`
+branch root. The publish action detects it and uses it in the
+generated `index.html` install snippet.)
+
+### 3. Trigger the first build
+
+Either wait up to 6 hours for the kernel workflow's schedule, or push
+the green button manually from **Actions → Build Hyper-V kernel
+(Ubuntu) → Run workflow**. Same for the hyperv package workflow.
 
 ## Out of scope (today)
 
