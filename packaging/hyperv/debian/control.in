@@ -6,31 +6,12 @@ Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
 Homepage: https://github.com/olljanat-ai/hyperv-for-linux
 
-Package: hyperv-hypervisor
-Architecture: amd64
-Depends: ${misc:Depends}
-Description: Microsoft Hypervisor binary (repackaged from Azure Linux non-oss)
- Ships the closed-source hypervisor loader (hvloader.efi) and supporting
- binaries under /usr/lib/hyperv/. Repackaged from the RPMs published at
- packages.microsoft.com/azurelinux/3.0/prod/non-oss/.
-
-Package: hyperv-firmware
-Architecture: amd64
-Depends: ${misc:Depends}
-Description: Firmware blobs required by the Microsoft Hypervisor
- Installs firmware files under /usr/lib/firmware/hyperv/ that the
- hypervisor loads at boot.
-
 Package: hyperv
 Architecture: amd64
-Depends:
- ${misc:Depends},
- hyperv-hypervisor (= ${binary:Version}),
- hyperv-firmware (= ${binary:Version}),
- systemd
-Recommends:
- linux-image-generic-hyperv
-Description: Hyper-V on Linux meta-package and boot integration
- Pulls in the hypervisor and firmware packages and runs the loader
- registration hook so the system boots into the Microsoft Hypervisor
- instead of (or alongside) the stock Ubuntu kernel.
+Depends: ${misc:Depends}, systemd
+Recommends: linux-image-hyperv
+Description: Microsoft Hypervisor for Linux (repackaged from Azure Linux non-oss)
+ Ships the Microsoft Hypervisor loader, supporting payload, and firmware
+ blobs, repackaged from packages.microsoft.com/azurelinux/3.0/prod/non-oss/.
+ The postinst installs hvloader.efi onto the ESP and registers a
+ systemd-boot entry that chainloads it.
