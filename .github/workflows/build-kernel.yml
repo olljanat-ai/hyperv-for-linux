@@ -51,6 +51,13 @@ jobs:
     container:
       image: ${{ github.event.inputs.ubuntu_image || 'ubuntu:latest' }}
       options: --user 0:0
+    defaults:
+      run:
+        # Inside a container, GitHub Actions falls back to /bin/sh (dash on
+        # Ubuntu) when it can't find bash on PATH at job start. Force bash
+        # explicitly so shopt / [[ ]] / arrays / pipefail work in every
+        # step.
+        shell: bash
     env:
       DEBIAN_FRONTEND: noninteractive
 
