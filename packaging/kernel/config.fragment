@@ -25,8 +25,13 @@ CONFIG_PCI_HYPERV=m
 CONFIG_PCI_HYPERV_INTERFACE=m
 
 # --- VTL / paravisor support --------------------------------------------
-# Needed when running OpenHCL paravisor / VTL2 workloads.
-CONFIG_HYPERV_VTL_MODE=y
+# CONFIG_HYPERV_VTL_MODE is intentionally NOT set here: upstream marks it
+# mutually exclusive with MSHV_ROOT (drivers/hv/Kconfig: 'depends on
+# !HYPERV_VTL_MODE'). VTL_MODE is for booting Linux as the OpenHCL
+# paravisor (i.e. as a Hyper-V guest in VTL2), which is the opposite of
+# this repo's goal of running Hyper-V on a Linux host. If we ever ship a
+# second flavour for the paravisor case it gets its own fragment.
+# CONFIG_HYPERV_VTL_MODE is not set
 
 # --- KVM (kept on so the same kernel can host KVM guests too) -----------
 CONFIG_KVM=m
