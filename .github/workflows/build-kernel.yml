@@ -1,35 +1,43 @@
-name: Build Hyper-V kernel (Ubuntu 26.04)
+name: Build Hyper-V kernel (Ubuntu)
 
-# Builds an Ubuntu 26.04 kernel with the MSHV root-partition driver and the
-# rest of the Hyper-V host bits enabled, then publishes the resulting
-# linux-image / linux-headers .deb files as workflow artifacts (and as a
-# GitHub Release when run from a tag).
+# Builds an Ubuntu kernel with the MSHV root-partition driver, the rest of
+# the Hyper-V host bits, and the mandatory MSHV EFI loader patch applied.
+# Sourced from the target Ubuntu series' archive ('apt-get source linux'),
+# not from upstream kernel.org, so the resulting .deb tracks Ubuntu's own
+# kernel revisions (security fixes, hardware enablement, etc.).
+#
+# Every 6 hours the workflow polls the archive for the latest 'linux'
+# source version. If it differs from what we've already built (tracked
+# via a 'kernel/<series>/<version>' git tag) a new build is produced and
+# pushed to the apt repository on gh-pages.
 
 on:
   workflow_dispatch:
     inputs:
-      kernel_version:
-        description: "Upstream stable kernel version (e.g. 6.14.5). Leave empty to use Ubuntu's archive source."
+      ubuntu_image:
+        description: "Ubuntu container image to build in (e.g. ubuntu:latest, ubuntu:rolling, ubuntu:questing)."
         required: false
-        default: ""
-      flavour:
-        description: "Local version suffix appended to the kernel (used as the package flavour)."
+        default: "ubuntu:latest"
+      force:
+        description: "Build even if this Ubuntu kernel version was already built."
         required: false
-        default: "hyperv"
+        default: "false"
   push:
     paths:
       - ".github/workflows/build-kernel.yml"
+      - ".github/actions/publish-apt/**"
       - "packaging/kernel/**"
   schedule:
-    # Rebuild weekly so security fixes from upstream stable get picked up.
-    - cron: "0 6 * * 1"
+    # Poll every 6 hours so a new Ubuntu kernel publish gets picked up
+    # within a working day.
+    - cron: "0 */6 * * *"
 
 permissions:
   contents: write
 
 concurrency:
-  # Serialise all writers to the apt repo (gh-pages) so two simultaneous
-  # publishes don't clobber each other.
+  # Share the apt-repo-publish gate with build-packages.yml so two
+  # simultaneous publishes don't clobber gh-pages.
   group: apt-repo-publish
   cancel-in-progress: false
 
@@ -37,106 +45,179 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    container:
+      image: ${{ github.event.inputs.ubuntu_image || 'ubuntu:latest' }}
+      options: --user 0:0
     env:
       DEBIAN_FRONTEND: noninteractive
-      KDEB_PKGVERSION_SUFFIX: hyperv
-      FLAVOUR: ${{ github.event.inputs.flavour || 'hyperv' }}
-      KERNEL_VERSION: ${{ github.event.inputs.kernel_version }}
 
     steps:
+      - name: Bootstrap container
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl wget git sudo \
+            xz-utils gnupg2 dpkg-dev devscripts
+          # Enable deb-src so 'apt-get source' / 'build-dep' work. Newer
+          # Ubuntu images use the deb822 format under sources.list.d/.
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sed -i 's/^Types: deb$/Types: deb deb-src/' \
+              /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          if [ -f /etc/apt/sources.list ]; then
+            sed -i 's/^# *deb-src/deb-src/' /etc/apt/sources.list || true
+          fi
+          apt-get update
+          . /etc/os-release
+          {
+            echo "UBUNTU_SERIES=${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+            echo "UBUNTU_VERSION=$VERSION_ID"
+          } >> "$GITHUB_ENV"
+          echo "Building inside Ubuntu $VERSION_ID (${UBUNTU_CODENAME:-$VERSION_CODENAME})"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Resolve latest Ubuntu kernel source version
+        id: kver
+        run: |
+          set -euo pipefail
+          VER="$(apt-cache showsrc linux | awk '/^Version:/ {print $2; exit}')"
+          if [ -z "$VER" ]; then
+            echo "::error::No 'linux' source package found in apt cache for ${UBUNTU_SERIES}"
+            exit 1
+          fi
+          # Tag-safe version (git tags reject ':' and a few others).
+          TAG_VER="$(echo "$VER" | tr ':~' '__')"
+          TAG="kernel/${UBUNTU_SERIES}/${TAG_VER}"
+          {
+            echo "version=$VER"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "Ubuntu ${UBUNTU_SERIES} 'linux' source version: $VER"
+          echo "Dedupe tag: $TAG"
+
+      - name: Skip if this version was already built
+        id: dedupe
+        env:
+          FORCE: ${{ github.event.inputs.force }}
+          TAG: ${{ steps.kver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "Force build requested; ignoring existing tag."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1 \
+             || git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing tag $TAG; will build."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Free disk space
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          df -h
+          # These paths only exist on the host runner; inside the container
+          # they may be absent. Silently continue if so.
+          rm -rf /__t/CodeQL /__t/Ruby /__t/PyPy /__t/Python /__t/node || true
+          df -h || true
 
       - name: Install build dependencies
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          apt-get install -y --no-install-recommends \
             build-essential bc kmod cpio flex bison libncurses-dev \
-            libelf-dev libssl-dev libdw-dev libudev-dev \
-            dwarves zstd rsync ccache fakeroot devscripts \
-            dpkg-dev debhelper python3 wget xz-utils git
+            libelf-dev libssl-dev libdw-dev libudev-dev dwarves zstd \
+            rsync ccache fakeroot debhelper python3 quilt
+          # Pull whatever else the Ubuntu kernel source declares as a build
+          # dependency. '|| true' so a missing arch-specific package
+          # (e.g. on a host architecture mismatch) doesn't abort.
+          apt-get build-dep -y --no-install-recommends linux || true
 
       - name: Configure ccache
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           ccache --max-size=5G
           echo "PATH=/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
 
       - name: Restore ccache
+        if: steps.dedupe.outputs.skip != 'true'
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-kernel-${{ env.FLAVOUR }}-${{ hashFiles('packaging/kernel/config.fragment') }}
+          key: ccache-${{ env.UBUNTU_SERIES }}-${{ steps.kver.outputs.version }}-${{ hashFiles('packaging/kernel/config.fragment') }}
           restore-keys: |
-            ccache-kernel-${{ env.FLAVOUR }}-
-            ccache-kernel-
+            ccache-${{ env.UBUNTU_SERIES }}-${{ steps.kver.outputs.version }}-
+            ccache-${{ env.UBUNTU_SERIES }}-
 
-      - name: Resolve kernel version
-        id: kver
+      - name: Fetch Ubuntu kernel source
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          if [ -n "${KERNEL_VERSION}" ]; then
-            VER="${KERNEL_VERSION}"
-          else
-            # Pick the latest stable from kernel.org. The mainline JSON has a
-            # 'releases' array with 'moniker' and 'version' fields.
-            VER="$(wget -qO- https://www.kernel.org/releases.json \
-              | python3 -c 'import json,sys
-data=json.load(sys.stdin)
-for r in data["releases"]:
-  if r["moniker"]=="stable":
-    print(r["version"]); break')"
+          mkdir -p src
+          cd src
+          # 'apt-get source linux' downloads orig + debian tarballs and
+          # extracts a tree with all Ubuntu quilt patches applied.
+          apt-get source linux
+          SRC_DIR="$(ls -d linux-*/ | head -n1 | sed 's:/$::')"
+          if [ -z "$SRC_DIR" ]; then
+            echo "::error::apt-get source linux produced no linux-*/ directory"
+            ls -la
+            exit 1
           fi
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "Building kernel ${VER}"
-
-      - name: Fetch kernel source
-        run: |
-          set -euo pipefail
-          VER="${{ steps.kver.outputs.version }}"
-          MAJOR="${VER%%.*}"
-          wget -q "https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${VER}.tar.xz"
-          tar -xf "linux-${VER}.tar.xz"
-          mv "linux-${VER}" linux
+          echo "SRC_DIR=$PWD/$SRC_DIR" >> "$GITHUB_ENV"
+          echo "Source tree: $PWD/$SRC_DIR"
 
       - name: Apply mandatory MSHV EFI loader patch
-        working-directory: linux
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          # "efi: Support Microsoft Hypervisor Loader" — required for the
-          # kernel to be launched by hvloader.efi. Without this the booted
-          # kernel cannot hand control to / receive control from the
-          # Microsoft Hypervisor and the entire stack is non-functional.
-          # Source: https://github.com/olljanat/linux/commit/4266b0011469b4cc7efd436c76861f2e9f8adbc1
+          # "efi: Support Microsoft Hypervisor Loader" — required so the
+          # EFI stub can hand off to / receive control from hvloader.efi.
           PATCH_URL="https://github.com/olljanat/linux/commit/4266b0011469b4cc7efd436c76861f2e9f8adbc1.patch"
-          wget -q -O ../mshv-efi-loader.patch "$PATCH_URL"
+          wget -q -O /tmp/mshv-efi-loader.patch "$PATCH_URL"
+          cd "$SRC_DIR"
+          # Stage the Ubuntu tree as a throwaway git repo so 'git am --3way'
+          # has the diff context it needs to land hunks that don't line up
+          # one-for-one against Ubuntu's modified files.
           git init -q .
           git config user.email "ci@example.invalid"
           git config user.name  "ci"
           git add -A
-          git commit -q -m "base ${{ steps.kver.outputs.version }}"
-          git am --3way ../mshv-efi-loader.patch
+          git -c commit.gpgsign=false commit -q \
+            -m "ubuntu ${UBUNTU_SERIES} linux ${{ steps.kver.outputs.version }}"
+          git am --3way /tmp/mshv-efi-loader.patch
 
-      - name: Seed config from Ubuntu defaults
-        working-directory: linux
+      - name: Seed config from Ubuntu's generic flavour
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          # Start from a sane Ubuntu-like baseline. If we can grab the
-          # current Ubuntu generic config from the archive use it, else fall
-          # back to the in-tree defconfig.
-          if wget -q -O /tmp/ubuntu.config \
-            "https://kernel.ubuntu.com/~kernel-ppa/configs/questing/linux/amd64-config.flavour.generic"; then
-            cp /tmp/ubuntu.config .config
+          cd "$SRC_DIR"
+          UBUNTU_CFG=""
+          for c in \
+            debian.master/config/amd64/config.flavour.generic \
+            debian/config/amd64/config.flavour.generic \
+            debian.master/config/config.common.ubuntu \
+            debian/config/config.common.ubuntu; do
+            if [ -f "$c" ]; then UBUNTU_CFG="$c"; break; fi
+          done
+          if [ -n "$UBUNTU_CFG" ]; then
+            echo "Seeding from $UBUNTU_CFG"
+            cp "$UBUNTU_CFG" .config
           else
+            echo "::warning::No Ubuntu flavour config found; using x86_64_defconfig"
             make x86_64_defconfig
           fi
-          # Some Ubuntu configs reference module signing / cert files we
-          # don't have. Strip those so the build doesn't fail.
+          # Drop signing / trusted-keys bits we don't have in CI.
           scripts/config --disable MODULE_SIG \
                          --disable MODULE_SIG_ALL \
                          --disable SYSTEM_TRUSTED_KEYS \
@@ -145,62 +226,78 @@ for r in data["releases"]:
                          --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
 
       - name: Merge Hyper-V config fragment
-        working-directory: linux
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           set -euo pipefail
+          cd "$SRC_DIR"
           ./scripts/kconfig/merge_config.sh -m .config \
-            ../packaging/kernel/config.fragment
-          # Resolve any new symbols non-interactively, defaulting to module/no.
+            "$GITHUB_WORKSPACE/packaging/kernel/config.fragment"
           make olddefconfig
-          # Verify the critical knobs actually ended up set.
           for sym in CONFIG_HYPERV CONFIG_MSHV_ROOT CONFIG_HYPERV_VSOCKETS; do
             if ! grep -qE "^${sym}=[ym]" .config; then
-              echo "::error::${sym} not enabled after merge — kernel ${{ steps.kver.outputs.version }} probably lacks it."
+              echo "::error::${sym} not enabled after merge"
               grep "${sym}" .config || true
               exit 1
             fi
           done
 
-      - name: Set kernel local version
-        working-directory: linux
-        run: |
-          echo "-${FLAVOUR}" > .scmversion
-          scripts/config --set-str LOCALVERSION "-${FLAVOUR}"
-
       - name: Build .deb packages
-        working-directory: linux
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          # bindeb-pkg produces linux-image / linux-headers / linux-libc-dev
-          # .debs in the parent directory.
+          cd "$SRC_DIR"
+          echo "-hyperv" > .scmversion
+          # Mirror Ubuntu's upstream version with a +hyperv1 suffix so the
+          # deb sorts above plain Ubuntu kernels of the same release and so
+          # 'apt upgrade' picks up new builds automatically.
+          DEB_VER="${{ steps.kver.outputs.version }}+hyperv1"
           make -j"$(nproc)" bindeb-pkg \
-            KDEB_PKGVERSION="$(make -s kernelversion)-1${FLAVOUR}" \
-            LOCALVERSION="-${FLAVOUR}"
+            KDEB_PKGVERSION="$DEB_VER" \
+            LOCALVERSION=-hyperv
 
       - name: Collect artifacts
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           set -euo pipefail
           mkdir -p out
-          mv linux-*.deb out/ || true
+          mv src/linux-*.deb out/ || true
           ls -lh out/
 
       - name: ccache stats
+        if: steps.dedupe.outputs.skip != 'true'
         run: ccache -s || true
 
       - name: Upload .deb artifacts
+        if: steps.dedupe.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-26.04-hyperv-kernel-${{ steps.kver.outputs.version }}
+          name: hyperv-kernel-${{ env.UBUNTU_SERIES }}-${{ steps.kver.outputs.version }}
           path: out/*.deb
           if-no-files-found: error
           retention-days: 30
 
       - name: Publish to apt repository
-        # Only publish the runnable kernel image; ship headers/libc-dev as
-        # workflow artifacts only — they bloat the repo and aren't part of
-        # the "two packages" deliverable.
+        if: steps.dedupe.outputs.skip != 'true'
         uses: ./.github/actions/publish-apt
         with:
-          debs_glob: "out/linux-image-*-${{ env.FLAVOUR }}_*_amd64.deb"
+          debs_glob: "out/linux-image-*-hyperv_*_amd64.deb"
           gpg_private_key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
           gpg_passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
+
+      - name: Tag this Ubuntu kernel version
+        if: steps.dedupe.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.kver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.email "ci@users.noreply.github.com"
+          git config user.name  "hyperv-for-linux ci"
+          git tag -a "$TAG" -m "Built Ubuntu ${UBUNTU_SERIES} linux ${{ steps.kver.outputs.version }}"
+          for delay in 0 2 4 8 16; do
+            [ "$delay" -eq 0 ] || sleep "$delay"
+            if git push origin "$TAG"; then exit 0; fi
+          done
+          # Tag-push failure shouldn't fail the run — the .debs are
+          # already published. Next scheduled run will re-detect and
+          # try again.
+          echo "::warning::Failed to push tag $TAG after retries"
