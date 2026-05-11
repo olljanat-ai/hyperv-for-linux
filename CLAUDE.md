@@ -147,9 +147,13 @@ to the repo root on `gh-pages` as `public.key` / `public.gpg`.
   - `CONFIG_HYPERV=y`
   - `CONFIG_HYPERV_VSOCKETS=y`
   - `CONFIG_MSHV_ROOT=m`
-  - `CONFIG_HYPERV_VTL_MODE=y` (where the tree exposes it)
   - all standard Hyper-V netvsc / storvsc / balloon / utils drivers
   - VFIO + intel/amd IOMMU on by default
+- `CONFIG_HYPERV_VTL_MODE` must stay **off**. Upstream's Kconfig marks
+  `MSHV_ROOT` as `depends on !HYPERV_VTL_MODE`, so flipping VTL_MODE on
+  silently drops MSHV_ROOT during `make olddefconfig`. VTL_MODE is for
+  booting Linux as the OpenHCL paravisor (the *guest* side under VTL2),
+  which is the opposite of what this repo ships.
 - **Vendored patches**: every file under `packaging/kernel/patches/`
   matching `*.patch` is applied on top of the Ubuntu tree with
   `git am --3way`, in lexical order, **before** the config seed/merge.
