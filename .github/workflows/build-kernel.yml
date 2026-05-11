@@ -34,6 +34,9 @@ on:
 
 permissions:
   contents: write
+  # Needed by the auto-issue step that fires when a vendored patch fails
+  # to apply against a fresh Ubuntu kernel source tree.
+  issues: write
 
 concurrency:
   # Share the apt-repo-publish gate with build-packages.yml so two
@@ -177,14 +180,20 @@ jobs:
           echo "SRC_DIR=$PWD/$SRC_DIR" >> "$GITHUB_ENV"
           echo "Source tree: $PWD/$SRC_DIR"
 
-      - name: Apply mandatory MSHV EFI loader patch
+      - name: Apply vendored kernel patches
+        id: patches
         if: steps.dedupe.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          # "efi: Support Microsoft Hypervisor Loader" — required so the
-          # EFI stub can hand off to / receive control from hvloader.efi.
-          PATCH_URL="https://github.com/olljanat/linux/commit/4266b0011469b4cc7efd436c76861f2e9f8adbc1.patch"
-          wget -q -O /tmp/mshv-efi-loader.patch "$PATCH_URL"
+          PATCH_DIR="$GITHUB_WORKSPACE/packaging/kernel/patches"
+          # Capture .patch files in lexical order. Empty directory is OK —
+          # the workflow just builds vanilla Ubuntu kernel + our config.
+          shopt -s nullglob
+          PATCHES=( "$PATCH_DIR"/*.patch )
+          if [ "${#PATCHES[@]}" -eq 0 ]; then
+            echo "No patches in $PATCH_DIR; skipping git am."
+            exit 0
+          fi
           cd "$SRC_DIR"
           # Stage the Ubuntu tree as a throwaway git repo so 'git am --3way'
           # has the diff context it needs to land hunks that don't line up
@@ -195,7 +204,119 @@ jobs:
           git add -A
           git -c commit.gpgsign=false commit -q \
             -m "ubuntu ${UBUNTU_SERIES} linux ${{ steps.kver.outputs.version }}"
-          git am --3way /tmp/mshv-efi-loader.patch
+          mkdir -p "$GITHUB_WORKSPACE/patch-logs"
+          LOG="$GITHUB_WORKSPACE/patch-logs/git-am.log"
+          : > "$LOG"
+          for p in "${PATCHES[@]}"; do
+            NAME="$(basename "$p")"
+            echo "::group::Applying $NAME"
+            if git am --3way "$p" 2>&1 | tee -a "$LOG"; then
+              echo "::endgroup::"
+              continue
+            fi
+            echo "::endgroup::"
+            # Failure path: surface as much detail as we can to the issue
+            # opener step, then abort.
+            {
+              echo
+              echo "=== conflicting files (.rej) ==="
+              find . -name '*.rej' -print
+              echo
+              echo "=== git am status ==="
+              git -c color.ui=never am --show-current-patch=diff || true
+              echo
+              echo "=== git status ==="
+              git -c color.ui=never status
+            } >> "$LOG"
+            {
+              echo "failed_patch=$NAME"
+              echo "ubuntu_version=${{ steps.kver.outputs.version }}"
+              echo "ubuntu_series=${UBUNTU_SERIES}"
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          done
+
+      - name: Upload patch logs on failure
+        if: failure() && steps.patches.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-logs-${{ env.UBUNTU_SERIES }}-${{ steps.kver.outputs.version }}
+          path: patch-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Open issue when a patch fails to apply
+        if: failure() && steps.patches.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const failedPatch  = '${{ steps.patches.outputs.failed_patch }}';
+            const ubuntuVer    = '${{ steps.kver.outputs.version }}';
+            const ubuntuSeries = process.env.UBUNTU_SERIES || 'unknown';
+            const runUrl       = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+
+            // Dedupe key in the title so a recurring failure on the same
+            // version/series/patch lands on the same issue.
+            const title = `kernel: patch ${failedPatch} fails on Ubuntu ${ubuntuSeries} linux ${ubuntuVer}`;
+
+            // Pull a short tail of the failure log into the issue body so
+            // the cause is visible without clicking through to the run.
+            let logTail = '';
+            try {
+              const log = fs.readFileSync(
+                path.join(process.env.GITHUB_WORKSPACE, 'patch-logs', 'git-am.log'),
+                'utf8');
+              const lines = log.split('\n');
+              logTail = lines.slice(-200).join('\n');
+            } catch (e) {
+              logTail = `(could not read git-am.log: ${e.message})`;
+            }
+
+            const body = [
+              `The kernel build workflow could not apply \`${failedPatch}\` ` +
+                `onto the Ubuntu **${ubuntuSeries}** \`linux\` source ` +
+                `version \`${ubuntuVer}\`.`,
+              ``,
+              `The patch lives at \`packaging/kernel/patches/${failedPatch}\` and ` +
+                `probably needs a refresh against the new Ubuntu tree.`,
+              ``,
+              `**Run:** ${runUrl}`,
+              ``,
+              `**Last 200 lines of \`git am\` output:**`,
+              '```',
+              logTail,
+              '```',
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+
+            // Look for an existing open issue with the same title.
+            const existing = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:issue is:open in:title "${title}"`,
+            });
+            const match = existing.data.items.find(i => i.title === title);
+
+            if (match) {
+              core.info(`Existing issue #${match.number} matches; adding a comment.`);
+              await github.rest.issues.createComment({
+                owner, repo,
+                issue_number: match.number,
+                body: `Still failing on run ${runUrl}.\n\n` +
+                      '```\n' + logTail + '\n```',
+              });
+            } else {
+              core.info('No existing issue matches; opening a new one.');
+              await github.rest.issues.create({
+                owner, repo,
+                title,
+                body,
+                labels: ['kernel-patch-fail', 'automated'],
+              });
+            }
 
       - name: Seed config from Ubuntu's generic flavour
         if: steps.dedupe.outputs.skip != 'true'
