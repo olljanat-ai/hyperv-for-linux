@@ -1,0 +1,216 @@
+name: Build Hyper-V install/update packages
+
+# Repackages the closed-source Microsoft Hypervisor bits from the Azure
+# Linux 3.0 non-oss repository into Debian packages targeting Ubuntu 26.04.
+# Produces three .debs:
+#   * hyperv-hypervisor — the hypervisor loader and its private payload
+#   * hyperv-firmware   — firmware blobs the hypervisor needs at boot
+#   * hyperv            — meta-package that pulls both in and registers the
+#                         systemd-boot entry that chainloads hvloader.efi.
+#
+# Run weekly so newly published Microsoft drops get picked up; tag pushes
+# additionally publish a Release.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-packages.yml"
+      - "packaging/hyperv/**"
+  schedule:
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: write
+
+env:
+  MS_REPO_URL: "https://packages.microsoft.com/azurelinux/3.0/prod/non-oss/x86_64"
+  # RPMs we want to repackage. If Microsoft renames or splits them this list
+  # is the single point of change.
+  MS_RPMS: "hypervisor hyperv-firmware"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential debhelper devscripts dpkg-dev fakeroot \
+            rpm2cpio cpio createrepo-c gnupg2 curl wget xz-utils \
+            ca-certificates jq python3
+
+      - name: Import Microsoft repo GPG key
+        run: |
+          set -euo pipefail
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor > /tmp/microsoft.gpg
+
+      - name: Resolve latest RPM URLs
+        id: rpms
+        run: |
+          set -euo pipefail
+          # The non-oss feed exposes a simple directory listing. Scrape it
+          # for the newest RPM matching each package name.
+          INDEX="$(curl -fsSL "${MS_REPO_URL}/")"
+          echo "$INDEX" > /tmp/index.html
+
+          mkdir -p downloads
+          for pkg in $MS_RPMS; do
+            # Pick the highest version sorted by dpkg --compare-versions.
+            CANDIDATES="$(printf '%s\n' "$INDEX" \
+              | grep -oE "${pkg}-[0-9][^\"']*\.rpm" \
+              | sort -uV)"
+            if [ -z "$CANDIDATES" ]; then
+              echo "::error::No RPMs found for '${pkg}' at ${MS_REPO_URL}/"
+              exit 1
+            fi
+            RPM="$(printf '%s\n' "$CANDIDATES" | tail -n1)"
+            echo "Latest ${pkg}: ${RPM}"
+            curl -fsSL -o "downloads/${RPM}" "${MS_REPO_URL}/${RPM}"
+          done
+          ls -lh downloads/
+
+      - name: Derive package version
+        id: version
+        run: |
+          set -euo pipefail
+          # Reuse the upstream hypervisor RPM's version-release so apt picks
+          # up new Microsoft drops automatically. Format: <ver>-<rel>~ms.
+          HV_RPM="$(ls downloads/hypervisor-*.rpm | head -n1)"
+          VR="$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$HV_RPM" \
+            2>/dev/null || true)"
+          if [ -z "$VR" ]; then
+            # Fallback: parse from filename if rpm isn't usable.
+            BN="$(basename "$HV_RPM" .rpm)"
+            VR="${BN#hypervisor-}"
+          fi
+          # Debian doesn't like '~' from RPM release fields starting with
+          # alpha; normalise just enough to keep dpkg happy.
+          DEB_VERSION="$(echo "$VR" | tr -c 'A-Za-z0-9.+:~-' '.')~ms1"
+          echo "deb_version=${DEB_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Debian version: ${DEB_VERSION}"
+
+      - name: Extract RPM payloads
+        run: |
+          set -euo pipefail
+          mkdir -p stage/hypervisor stage/firmware
+          for rpm in downloads/hypervisor-*.rpm; do
+            (cd stage/hypervisor && rpm2cpio "../../$rpm" | cpio -idm)
+          done
+          for rpm in downloads/hyperv-firmware-*.rpm; do
+            (cd stage/firmware && rpm2cpio "../../$rpm" | cpio -idm)
+          done
+          # Sanity: hvloader.efi must be present, otherwise everything
+          # downstream is pointless.
+          find stage/hypervisor -name 'hvloader.efi' -print | head -n1 \
+            | grep -q . || { echo "::error::hvloader.efi missing in hypervisor RPM"; exit 1; }
+
+      - name: Build hyperv-hypervisor .deb
+        run: |
+          set -euo pipefail
+          ROOT="build/hyperv-hypervisor"
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/lib/hyperv"
+          # Copy everything from the RPM under /usr/lib/hyperv/ — the
+          # upstream layout uses /usr/share, but on Debian /usr/lib is the
+          # canonical home for non-arch-specific binaries.
+          cp -a stage/hypervisor/. "$ROOT/"
+          # Promote hvloader.efi (and friends) to a stable path the
+          # postinst hook expects.
+          HVLOADER="$(find "$ROOT" -name hvloader.efi | head -n1)"
+          if [ -n "$HVLOADER" ] && [ "$HVLOADER" != "$ROOT/usr/lib/hyperv/hvloader.efi" ]; then
+            install -D -m 0644 "$HVLOADER" "$ROOT/usr/lib/hyperv/hvloader.efi"
+          fi
+          cat > "$ROOT/DEBIAN/control" <<EOF
+          Package: hyperv-hypervisor
+          Version: ${{ steps.version.outputs.deb_version }}
+          Section: admin
+          Priority: optional
+          Architecture: amd64
+          Maintainer: hyperv-for-linux maintainers <noreply@example.invalid>
+          Description: Microsoft Hypervisor binary (repackaged from Azure Linux non-oss)
+           Ships /usr/lib/hyperv/hvloader.efi and supporting payload, repackaged
+           from packages.microsoft.com/azurelinux/3.0/prod/non-oss/.
+          EOF
+          dpkg-deb --build --root-owner-group "$ROOT" out/
+
+      - name: Build hyperv-firmware .deb
+        run: |
+          set -euo pipefail
+          ROOT="build/hyperv-firmware"
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/lib/firmware/hyperv"
+          cp -a stage/firmware/. "$ROOT/"
+          cat > "$ROOT/DEBIAN/control" <<EOF
+          Package: hyperv-firmware
+          Version: ${{ steps.version.outputs.deb_version }}
+          Section: admin
+          Priority: optional
+          Architecture: amd64
+          Maintainer: hyperv-for-linux maintainers <noreply@example.invalid>
+          Description: Firmware blobs required by the Microsoft Hypervisor
+          EOF
+          dpkg-deb --build --root-owner-group "$ROOT" out/
+
+      - name: Build hyperv meta .deb (loader registration)
+        run: |
+          set -euo pipefail
+          ROOT="build/hyperv"
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/lib/hyperv"
+          install -m 0755 packaging/hyperv/scripts/register-loader.sh \
+            "$ROOT/usr/lib/hyperv/register-loader.sh"
+          install -m 0755 packaging/hyperv/scripts/unregister-loader.sh \
+            "$ROOT/usr/lib/hyperv/unregister-loader.sh"
+          cat > "$ROOT/DEBIAN/control" <<EOF
+          Package: hyperv
+          Version: ${{ steps.version.outputs.deb_version }}
+          Section: admin
+          Priority: optional
+          Architecture: amd64
+          Maintainer: hyperv-for-linux maintainers <noreply@example.invalid>
+          Depends: hyperv-hypervisor (= ${{ steps.version.outputs.deb_version }}), hyperv-firmware (= ${{ steps.version.outputs.deb_version }}), systemd
+          Description: Hyper-V on Linux meta-package and boot integration
+          EOF
+          cat > "$ROOT/DEBIAN/postinst" <<'EOF'
+          #!/bin/sh
+          set -e
+          /usr/lib/hyperv/register-loader.sh || true
+          EOF
+          cat > "$ROOT/DEBIAN/prerm" <<'EOF'
+          #!/bin/sh
+          set -e
+          /usr/lib/hyperv/unregister-loader.sh || true
+          EOF
+          chmod 0755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/prerm"
+          dpkg-deb --build --root-owner-group "$ROOT" out/
+
+      - name: List built packages
+        run: |
+          ls -lh out/
+          for deb in out/*.deb; do
+            echo "=== $deb ==="
+            dpkg-deb -I "$deb"
+            dpkg-deb -c "$deb" | head -n 20
+          done
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-26.04-hyperv-packages-${{ steps.version.outputs.deb_version }}
+          path: out/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.deb
+          generate_release_notes: true
