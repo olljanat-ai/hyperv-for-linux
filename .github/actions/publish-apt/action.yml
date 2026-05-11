@@ -1,0 +1,236 @@
+name: Publish .deb to apt repo
+description: >
+  Adds one or more .deb files to the apt repository hosted on the
+  gh-pages branch of this repository, regenerates Packages/Release metadata
+  with apt-ftparchive, signs Release with GPG, commits, and pushes.
+
+inputs:
+  debs_glob:
+    description: Glob (relative to workspace) matching .deb files to publish.
+    required: true
+  suite:
+    description: Suite name under dists/ (e.g. stable).
+    required: false
+    default: stable
+  component:
+    description: Repo component name (e.g. main).
+    required: false
+    default: main
+  architecture:
+    description: Debian architecture string (e.g. amd64).
+    required: false
+    default: amd64
+  gpg_private_key:
+    description: ASCII-armored GPG private key used to sign Release.
+    required: true
+  gpg_passphrase:
+    description: Passphrase for the GPG private key (may be empty).
+    required: false
+    default: ""
+  pages_branch:
+    description: Branch hosting the apt repository.
+    required: false
+    default: gh-pages
+  origin:
+    description: Origin field for the Release file.
+    required: false
+    default: hyperv-for-linux
+  label:
+    description: Label field for the Release file.
+    required: false
+    default: hyperv-for-linux
+
+runs:
+  using: composite
+  steps:
+    - name: Install apt-ftparchive and gpg
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          apt-utils gnupg2 ca-certificates
+
+    - name: Import signing key
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.gpg_private_key }}
+      run: |
+        set -euo pipefail
+        export GNUPGHOME="$(mktemp -d)"
+        echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+        chmod 700 "$GNUPGHOME"
+        printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+        KEY_ID="$(gpg --list-secret-keys --with-colons \
+          | awk -F: '/^sec/{print $5; exit}')"
+        if [ -z "$KEY_ID" ]; then
+          echo "::error::Could not find an imported secret key"; exit 1
+        fi
+        echo "GPG_KEY_ID=$KEY_ID" >> "$GITHUB_ENV"
+        # Export the public key so it can be served at the repo root for
+        # users to 'apt-key add' / drop in /etc/apt/trusted.gpg.d/.
+        gpg --armor --export "$KEY_ID" > /tmp/public.gpg
+        gpg --export "$KEY_ID" > /tmp/public.key
+
+    - name: Checkout apt-repo branch
+      shell: bash
+      env:
+        PAGES_BRANCH: ${{ inputs.pages_branch }}
+      run: |
+        set -euo pipefail
+        REPO_URL="https://x-access-token:${GH_TOKEN_FOR_PUSH:-${GITHUB_TOKEN}}@github.com/${GITHUB_REPOSITORY}.git"
+        rm -rf apt-repo
+        git clone --branch "$PAGES_BRANCH" --depth 1 "$REPO_URL" apt-repo \
+          || git clone --depth 1 "$REPO_URL" apt-repo
+        cd apt-repo
+        if ! git rev-parse --verify "$PAGES_BRANCH" >/dev/null 2>&1; then
+          git checkout --orphan "$PAGES_BRANCH"
+          git rm -rf . >/dev/null 2>&1 || true
+        fi
+        git config user.email "ci@users.noreply.github.com"
+        git config user.name  "hyperv-for-linux ci"
+
+    - name: Drop .debs into pool/
+      shell: bash
+      env:
+        DEBS_GLOB: ${{ inputs.debs_glob }}
+        COMPONENT: ${{ inputs.component }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        FILES=( $DEBS_GLOB )
+        if [ "${#FILES[@]}" -eq 0 ]; then
+          echo "::error::No .deb files matched glob '$DEBS_GLOB'"; exit 1
+        fi
+        for deb in "${FILES[@]}"; do
+          PKG="$(dpkg-deb -f "$deb" Package)"
+          # Standard Debian pool layout: pool/<component>/<l>/<pkg>/<file>
+          case "$PKG" in
+            lib?*) PREFIX="lib${PKG#lib}" ;;
+            *)     PREFIX="${PKG}" ;;
+          esac
+          LETTER="$(printf '%s' "$PREFIX" | cut -c1)"
+          DEST="apt-repo/pool/${COMPONENT}/${LETTER}/${PKG}"
+          mkdir -p "$DEST"
+          cp -v "$deb" "$DEST/"
+        done
+
+    - name: Regenerate Packages / Release
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        COMPONENT: ${{ inputs.component }}
+        ARCH: ${{ inputs.architecture }}
+        ORIGIN: ${{ inputs.origin }}
+        LABEL: ${{ inputs.label }}
+      run: |
+        set -euo pipefail
+        cd apt-repo
+        BIN_DIR="dists/${SUITE}/${COMPONENT}/binary-${ARCH}"
+        mkdir -p "$BIN_DIR"
+
+        # Packages index for the architecture.
+        apt-ftparchive --arch "$ARCH" packages "pool/${COMPONENT}" \
+          > "$BIN_DIR/Packages"
+        gzip -9kf "$BIN_DIR/Packages"
+
+        # Per-component-arch Release stub (suite-level Release below points
+        # at this via the file hashes).
+        cat > "$BIN_DIR/Release" <<EOF
+        Archive: ${SUITE}
+        Component: ${COMPONENT}
+        Origin: ${ORIGIN}
+        Label: ${LABEL}
+        Architecture: ${ARCH}
+        EOF
+
+        # Suite-level Release. apt-ftparchive computes the hashes for every
+        # file referenced by the apt-ftparchive.conf-equivalent settings we
+        # pass via -o options.
+        cat > /tmp/apt-ftparchive.conf <<EOF
+        APT::FTPArchive::Release::Origin "${ORIGIN}";
+        APT::FTPArchive::Release::Label "${LABEL}";
+        APT::FTPArchive::Release::Suite "${SUITE}";
+        APT::FTPArchive::Release::Codename "${SUITE}";
+        APT::FTPArchive::Release::Architectures "${ARCH}";
+        APT::FTPArchive::Release::Components "${COMPONENT}";
+        APT::FTPArchive::Release::Description "hyperv-for-linux apt repository";
+        EOF
+        apt-ftparchive -c /tmp/apt-ftparchive.conf \
+          release "dists/${SUITE}" > "dists/${SUITE}/Release"
+
+    - name: Sign Release
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        GPG_PASSPHRASE: ${{ inputs.gpg_passphrase }}
+      run: |
+        set -euo pipefail
+        cd apt-repo
+        REL="dists/${SUITE}/Release"
+        # Detached signature.
+        gpg --batch --yes --pinentry-mode loopback \
+            ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+            --local-user "$GPG_KEY_ID" \
+            --armor --detach-sign --output "${REL}.gpg" "$REL"
+        # Inline-signed InRelease (preferred by modern apt).
+        gpg --batch --yes --pinentry-mode loopback \
+            ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+            --local-user "$GPG_KEY_ID" \
+            --clear-sign --output "dists/${SUITE}/InRelease" "$REL"
+
+    - name: Publish public key and instructions
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd apt-repo
+        cp /tmp/public.gpg ./public.gpg
+        cp /tmp/public.key ./public.key
+        if [ ! -f index.html ]; then
+          cat > index.html <<'EOF'
+        <!doctype html>
+        <html><head><meta charset="utf-8"><title>hyperv-for-linux apt repository</title></head>
+        <body>
+        <h1>hyperv-for-linux apt repository</h1>
+        <p>Adds the Microsoft Hypervisor and a matching Hyper-V capable kernel to Ubuntu 26.04.</p>
+        <pre>
+        # Trust the signing key
+        sudo install -d /etc/apt/keyrings
+        curl -fsSL https://<your-pages-host>/public.key \
+          | sudo tee /etc/apt/keyrings/hyperv-for-linux.gpg >/dev/null
+
+        # Add the repository
+        echo "deb [signed-by=/etc/apt/keyrings/hyperv-for-linux.gpg] \
+          https://<your-pages-host> stable main" \
+          | sudo tee /etc/apt/sources.list.d/hyperv-for-linux.list
+
+        sudo apt-get update
+        sudo apt-get install linux-image-hyperv hyperv
+        </pre>
+        </body></html>
+        EOF
+        fi
+
+    - name: Commit and push
+      shell: bash
+      env:
+        PAGES_BRANCH: ${{ inputs.pages_branch }}
+      run: |
+        set -euo pipefail
+        cd apt-repo
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No changes to publish."
+          exit 0
+        fi
+        SHORTSHA="${GITHUB_SHA:0:7}"
+        git commit -m "Publish .debs from ${GITHUB_WORKFLOW} @ ${SHORTSHA}"
+        # Retry with exponential backoff to survive concurrent publishes.
+        for delay in 0 2 4 8 16; do
+          [ "$delay" -eq 0 ] || sleep "$delay"
+          if git push origin "HEAD:${PAGES_BRANCH}"; then
+            exit 0
+          fi
+          git pull --rebase origin "$PAGES_BRANCH" || true
+        done
+        echo "::error::Failed to push to ${PAGES_BRANCH} after retries"
+        exit 1
