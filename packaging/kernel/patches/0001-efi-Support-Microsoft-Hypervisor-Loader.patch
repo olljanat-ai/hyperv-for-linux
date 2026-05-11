@@ -1,0 +1,812 @@
+From 4266b0011469b4cc7efd436c76861f2e9f8adbc1 Mon Sep 17 00:00:00 2001
+From: Olli Janatuinen <olli.janatuinen@gmail.com>
+Date: Mon, 23 Feb 2026 21:12:53 +0000
+Subject: [PATCH] efi: Support Microsoft Hypervisor Loader
+
+Cherry-picked combination of:
+* https://github.com/microsoft/CBL-Mariner-Linux-Kernel/commit/6c7f54be6463565b659ab396906cffc358c9791b
+* https://github.com/microsoft/CBL-Mariner-Linux-Kernel/commit/2d530adaeb196cdb447713a41e36b777511ee3ac
+* https://github.com/microsoft/CBL-Mariner-Linux-Kernel/commit/b64348ea1d92817bc30d9f558df5039faf5abf73
+* https://github.com/microsoft/CBL-Mariner-Linux-Kernel/commit/471415052971d7507c82e0bada3beb808b2bb7be
+* https://github.com/microsoft/CBL-Mariner-Linux-Kernel/commit/1d3a6f847c395be917550d5b2326c1091f278192
+* https://github.com/microsoft/CBL-Mariner-Linux-Kernel/commit/531df991cd0ae7b958fb293b8bfec1dc80c11e99
+---
+ arch/x86/include/uapi/asm/setup_data.h        |   3 +-
+ drivers/firmware/efi/libstub/Makefile         |  10 +
+ drivers/firmware/efi/libstub/arm64-efi-mshv.c |  41 ++++
+ .../firmware/efi/libstub/efi-mshv-common.c    | 135 ++++++++++++
+ drivers/firmware/efi/libstub/efi-mshv.h       | 116 ++++++++++
+ drivers/firmware/efi/libstub/efi-stub.c       |   5 +
+ drivers/firmware/efi/libstub/fdt.c            |  14 +-
+ drivers/firmware/efi/libstub/x86-efi-mshv.c   | 203 ++++++++++++++++++
+ drivers/firmware/efi/libstub/x86-stub.c       |  15 +-
+ drivers/hv/hv_common.c                        |  64 ++++++
+ include/linux/efi.h                           |   1 +
+ 11 files changed, 604 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/firmware/efi/libstub/arm64-efi-mshv.c
+ create mode 100644 drivers/firmware/efi/libstub/efi-mshv-common.c
+ create mode 100644 drivers/firmware/efi/libstub/efi-mshv.h
+ create mode 100644 drivers/firmware/efi/libstub/x86-efi-mshv.c
+
+diff --git a/arch/x86/include/uapi/asm/setup_data.h b/arch/x86/include/uapi/asm/setup_data.h
+index 2671c4e1b3a0b7..e88f7bf709abef 100644
+--- a/arch/x86/include/uapi/asm/setup_data.h
++++ b/arch/x86/include/uapi/asm/setup_data.h
+@@ -14,7 +14,8 @@
+ #define SETUP_IMA			8
+ #define SETUP_RNG_SEED			9
+ #define SETUP_KEXEC_KHO			10
+-#define SETUP_ENUM_MAX			SETUP_KEXEC_KHO
++#define SETUP_MSHV			11
++#define SETUP_ENUM_MAX			SETUP_MSHV
+ 
+ #define SETUP_INDIRECT			(1<<31)
+ #define SETUP_TYPE_MAX			(SETUP_ENUM_MAX | SETUP_INDIRECT)
+diff --git a/drivers/firmware/efi/libstub/Makefile b/drivers/firmware/efi/libstub/Makefile
+index e386ffd009b7ef..061879a82c04ab 100644
+--- a/drivers/firmware/efi/libstub/Makefile
++++ b/drivers/firmware/efi/libstub/Makefile
+@@ -88,6 +88,16 @@ lib-$(CONFIG_X86)		+= x86-stub.o smbios.o
+ lib-$(CONFIG_X86_64)		+= x86-5lvl.o
+ lib-$(CONFIG_RISCV)		+= kaslr.o riscv.o riscv-stub.o
+ lib-$(CONFIG_LOONGARCH)		+= loongarch.o loongarch-stub.o
++lib-$(subst m,y,$(CONFIG_MSHV_ROOT)) += efi-mshv-common.o
++UBSAN_SANITIZE_efi-mshv-common.o := n
++ifdef CONFIG_X86_64
++lib-$(CONFIG_MSHV_ROOT)	+= x86-efi-mshv.o
++UBSAN_SANITIZE_x86-efi-mshv.o := n
++endif
++ifdef CONFIG_ARM64
++lib-$(subst m,y,$(CONFIG_MSHV_ROOT)) += arm64-efi-mshv.o
++UBSAN_SANITIZE_arm64-efi-mshv.o := n
++endif
+ 
+ CFLAGS_arm32-stub.o		:= -DTEXT_OFFSET=$(TEXT_OFFSET)
+ 
+diff --git a/drivers/firmware/efi/libstub/arm64-efi-mshv.c b/drivers/firmware/efi/libstub/arm64-efi-mshv.c
+new file mode 100644
+index 00000000000000..374ca1b41e0358
+--- /dev/null
++++ b/drivers/firmware/efi/libstub/arm64-efi-mshv.c
+@@ -0,0 +1,41 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++#include <linux/efi.h>
++#include <asm/efi.h>
++#include <asm/setup.h>
++
++#include "efistub.h"
++#include "efi-mshv.h"
++
++efi_status_t mshv_efi_setup(char **cmdline_ptr)
++{
++	efi_status_t status;
++	efi_memory_desc_t *mem_map;
++	unsigned long map_sz, desc_sz, new_cmdline_addr;
++
++	status = mshv_efi_init();
++	if (status == EFI_NOT_FOUND) // we are in a standard Linux boot
++		return EFI_SUCCESS;
++
++	map_sz = 0;
++	mshv_get_hv_ranges((void *)&mem_map, &map_sz, &desc_sz);
++
++	status = efi_bs_call(allocate_pool, EFI_LOADER_DATA, COMMAND_LINE_SIZE,
++			     (void **)&new_cmdline_addr);
++	if (status != EFI_SUCCESS)
++		mshv_efi_reboot("failed to allocate space for cmdline with code %d",
++				status);
++
++	mshv_efi_update_cmdline(mem_map, map_sz, desc_sz,
++				*cmdline_ptr,
++				(char *)new_cmdline_addr, COMMAND_LINE_SIZE);
++
++	status = efi_bs_call(free_pool, *cmdline_ptr);
++	if (status != EFI_SUCCESS)
++		mshv_efi_reboot("failed to free old cmdline with code %d",
++				status);
++
++	*cmdline_ptr = (char *)new_cmdline_addr;
++
++	return EFI_SUCCESS;
++}
+diff --git a/drivers/firmware/efi/libstub/efi-mshv-common.c b/drivers/firmware/efi/libstub/efi-mshv-common.c
+new file mode 100644
+index 00000000000000..04fd390f35ed7a
+--- /dev/null
++++ b/drivers/firmware/efi/libstub/efi-mshv-common.c
+@@ -0,0 +1,135 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++#include "efistub.h"
++#include "efi-mshv.h"
++
++struct efi_hvloader_protocol *efi_mshv;
++
++efi_status_t mshv_efi_init(void)
++{
++	efi_status_t status;
++	static efi_guid_t hv_proto_guid = EFI_MSHV_MEDIA_PROTOCOL_GUID;
++
++	status = efi_bs_call(locate_protocol,
++			     &hv_proto_guid, NULL, (void **)&efi_mshv);
++	if (status == EFI_NOT_FOUND) {
++		/* If the protocol is not installed we are in a standard Linux boot */
++		return status;
++	} else if (status != EFI_SUCCESS) {
++		mshv_efi_reboot("LocateProtocol failed unexpectedly with code %d",
++			       status);
++	}
++
++	status = efi_mshv->get_loader_init_status();
++	if (status != EFI_SUCCESS)
++		mshv_efi_reboot("mshv protocol installed but seems to have failed with code %d",
++			       status);
++
++	return EFI_SUCCESS;
++}
++
++void mshv_get_hv_ranges(efi_memory_desc_t **mem_map, unsigned long *map_sz,
++			unsigned long *desc_sz)
++{
++	efi_status_t status;
++
++	status = efi_mshv->get_hv_ranges((void **)mem_map, map_sz, desc_sz);
++	if (status != EFI_SUCCESS)
++		mshv_efi_reboot("failed to retrieve mshv ranges: error code %d",
++			       status);
++}
++
++/*
++ * Concatenate the hypervisor reserved ranges to the command line.
++ *
++ * The reserved ranges are formatted as follows:
++ * 'hyperv_resvd_new=<size>!<address>,<size>!<address>,...'
++ *
++ * @mem_map:		EFI memory map with the hypervisor reserved ranges
++ * @map_sz:		size of the memory map
++ * @desc_sz:		size of each descriptor in the memory map
++ * @old_cmdline:	old command line
++ * @buf:		buffer to hold the new command line
++ */
++void mshv_efi_update_cmdline(efi_memory_desc_t *mem_map,
++		unsigned long map_sz, unsigned long desc_sz, char *old_cmdline,
++		char *buf, unsigned long buf_sz)
++{
++	int i, cmdline_len, nr_desc;
++
++	cmdline_len = strlen(old_cmdline);
++	memcpy(buf, old_cmdline, cmdline_len + 1);
++
++	cmdline_len += snprintf(buf + cmdline_len,
++				buf_sz - cmdline_len,
++				" hyperv_resvd_new=");
++
++	nr_desc = map_sz / desc_sz;
++	for (i = 0; i < nr_desc; ++i) {
++		efi_memory_desc_t *d;
++		u64 start, end, sz;
++
++		d = efi_memdesc_ptr(mem_map, desc_sz, i);
++		start = d->phys_addr;
++		sz = d->num_pages << PAGE_SHIFT;
++		end = start + sz - 1;
++
++		cmdline_len += snprintf(buf + cmdline_len,
++					buf_sz - cmdline_len,
++					"%s0x%llx!0x%llx", i > 0 ? "," : "",
++					sz, start);
++	}
++}
++
++efi_status_t mshv_set_efi_rt_range(struct efi_boot_memmap *map)
++{
++	u32 nr_desc;
++	int i;
++	efi_status_t status;
++
++	if (!efi_mshv)
++		return EFI_SUCCESS;
++
++	nr_desc = map->map_size / map->desc_size;
++
++	for (i = 0; i < nr_desc; i++) {
++		efi_memory_desc_t *d;
++
++		d = efi_memdesc_ptr(map->map, map->desc_size, i);
++		switch (d->type) {
++		case EFI_RUNTIME_SERVICES_CODE:
++		case EFI_RUNTIME_SERVICES_DATA:
++			status = efi_mshv->register_range(d->phys_addr >> PAGE_SHIFT,
++								d->num_pages);
++			if (status != EFI_SUCCESS)
++				return status;
++			break;
++		default:
++			/* default case: range is not relevant to mshv */
++			break;
++		}
++	}
++
++	return EFI_SUCCESS;
++}
++
++/*
++ * Launch mshv, if enabled.
++ *
++ * If mshv reports a bad status at this point, abort the boot.
++ * To get more information about the failure, the HV loader's internal
++ * logging can be used, which is exposed via efi_hv->get_next_log_msg(...).
++ *
++ */
++void mshv_launch(void)
++{
++	struct hvl_return_data ret;
++
++	if (!efi_mshv)
++		return;
++
++	efi_mshv->launch_hv(NULL, &ret);
++	/* TODO: Where/how do we dump the hv loader logs? */
++	if (ret.launch_data.launch_status != 0)
++		efi_rt_call(reset_system, EFI_RESET_COLD, EFI_ABORTED, 0, NULL);
++}
+diff --git a/drivers/firmware/efi/libstub/efi-mshv.h b/drivers/firmware/efi/libstub/efi-mshv.h
+new file mode 100644
+index 00000000000000..6241c0cedee9c3
+--- /dev/null
++++ b/drivers/firmware/efi/libstub/efi-mshv.h
+@@ -0,0 +1,116 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++
++#ifndef _DRIVERS_FIRMWARE_EFI_MSHV_H
++#define _DRIVERS_FIRMWARE_EFI_MSHV_H
++
++#include "efistub.h"
++
++#if !IS_ENABLED(CONFIG_MSHV_ROOT)
++#ifdef CONFIG_X86_64
++static inline efi_status_t mshv_efi_setup(struct boot_params *boot_params)
++{
++	return EFI_SUCCESS;
++}
++#endif /* CONFIG_X86_64 */
++
++#ifdef CONFIG_ARM64
++static inline efi_status_t mshv_efi_setup(char **cmdline_ptr)
++{
++	return EFI_SUCCESS;
++}
++#endif /* CONFIG_ARM64 */
++
++static inline efi_status_t mshv_set_efi_rt_range(struct efi_boot_memmap *map)
++{
++	return EFI_SUCCESS;
++}
++
++static inline void mshv_launch(void) {}
++#else /* !CONFIG_MSHV_ROOT */
++
++extern struct efi_hvloader_protocol *efi_mshv;
++
++static inline void mshv_efi_reboot(const char *fmt, ...)
++{
++	va_list args;
++
++	va_start(args, fmt);
++	efi_printk(fmt, args);
++	va_end(args);
++
++	efi_bs_call(stall, 5 * EFI_USEC_PER_SEC);
++	efi_rt_call(reset_system, EFI_RESET_COLD, EFI_ABORTED, 0, NULL);
++}
++
++efi_status_t mshv_efi_init(void);
++void mshv_get_hv_ranges(efi_memory_desc_t **mem_map, unsigned long *map_sz,
++			unsigned long *desc_sz);
++void mshv_efi_update_cmdline(efi_memory_desc_t *mem_map,
++		unsigned long map_sz, unsigned long desc_sz, char *cmdline,
++		char *buf, unsigned long buf_sz);
++
++#ifdef CONFIG_X86_64
++efi_status_t mshv_efi_setup(struct boot_params *boot_params);
++#endif /* CONFIG_X86_64 */
++
++#ifdef CONFIG_ARM64
++efi_status_t mshv_efi_setup(char **cmdline_ptr);
++#endif /* CONFIG_ARM64 */
++
++efi_status_t mshv_set_efi_rt_range(struct efi_boot_memmap *map);
++void mshv_launch(void);
++
++struct hvl_dbg_data {
++	u8 unused[552];
++} __packed;
++
++struct hvl_launch_data {
++	u64 launch_status;
++	u64 launch_substatus1;
++} __packed;
++
++struct hvl_load_data {
++	u32 is_unsafe_config:1;
++	u32 reserved:31;
++} __packed;
++
++struct hvl_return_data {
++	u32 crash_dump_area_page_count;
++	u32 unused;
++	u64 crashdump_area_spa;
++	union {
++		struct hvl_launch_data launch_data;
++		struct hvl_load_data load_data;
++	};
++	struct hvl_dbg_data debug_data;
++	void *spa_page_range_array;
++	u32 range_count;
++
++	struct
++	{
++		u32 base_checksum;
++		u32 base_timestamp;
++		u32 patch_checksum;
++		u32 patch_timestamp;
++		u32 base_hpat_entries_used;
++		u32 patch_hpat_entries_used;
++		u32 patch_sequence_number;
++	} patch_details;
++} __packed;
++
++struct efi_hvloader_protocol {
++	void (__efiapi * launch_hv)(void *, struct hvl_return_data *);
++	efi_status_t (__efiapi * register_range)(u64, u64);
++	efi_status_t (__efiapi * get_memory_map)(unsigned long *, void *,
++						unsigned long *,
++						unsigned long *, u32 *);
++	efi_status_t (__efiapi * get_hv_ranges)(void **,
++						unsigned long *,
++						unsigned long *);
++	efi_status_t (__efiapi * get_loader_init_status)(void);
++	efi_char16_t *(__efiapi * get_next_log_msg)(size_t *);
++};
++
++#endif /* CONFIG_MSHV_ROOT */
++
++#endif /* _DRIVERS_FIRMWARE_EFI_MSHV_H */
+diff --git a/drivers/firmware/efi/libstub/efi-stub.c b/drivers/firmware/efi/libstub/efi-stub.c
+index 42d6073bcd062a..fde9eb9a336cc3 100644
+--- a/drivers/firmware/efi/libstub/efi-stub.c
++++ b/drivers/firmware/efi/libstub/efi-stub.c
+@@ -14,6 +14,7 @@
+ #include <asm/efi.h>
+ 
+ #include "efistub.h"
++#include "efi-mshv.h"
+ 
+ /*
+  * This is the base address at which to start allocating virtual memory ranges
+@@ -162,6 +163,10 @@ efi_status_t efi_stub_common(efi_handle_t handle,
+ 	if (status != EFI_SUCCESS)
+ 		return status;
+ 
++	#if defined(CONFIG_ARM64)
++		mshv_efi_setup(&cmdline_ptr);
++	#endif
++
+ 	dpy = setup_primary_display();
+ 
+ 	efi_retrieve_eventlog();
+diff --git a/drivers/firmware/efi/libstub/fdt.c b/drivers/firmware/efi/libstub/fdt.c
+index 6a337f1f8787b3..fd06ccf4b164a9 100644
+--- a/drivers/firmware/efi/libstub/fdt.c
++++ b/drivers/firmware/efi/libstub/fdt.c
+@@ -12,6 +12,7 @@
+ #include <asm/efi.h>
+ 
+ #include "efistub.h"
++#include "efi-mshv.h"
+ 
+ #define EFI_DT_ADDR_CELLS_DEFAULT 2
+ #define EFI_DT_SIZE_CELLS_DEFAULT 2
+@@ -190,7 +191,8 @@ struct exit_boot_struct {
+ 
+ static efi_status_t exit_boot_func(struct efi_boot_memmap *map, void *priv)
+ {
+-	struct exit_boot_struct *p = priv;
++	struct exit_boot_struct *p = priv;¨
++	efi_status_t status;
+ 
+ 	p->boot_memmap = map;
+ 
+@@ -202,6 +204,10 @@ static efi_status_t exit_boot_func(struct efi_boot_memmap *map, void *priv)
+ 	efi_get_virtmap(map->map, map->map_size, map->desc_size,
+ 			p->runtime_map, &p->runtime_entry_count);
+ 
++	status = mshv_set_efi_rt_range(map);
++		if (status != EFI_SUCCESS)
++			return status;
++
+ 	return update_fdt_memmap(p->new_fdt_addr, map);
+ }
+ 
+@@ -357,6 +363,12 @@ efi_status_t efi_boot_kernel(void *handle, efi_loaded_image_t *image,
+ 	if (IS_ENABLED(CONFIG_ARM))
+ 		efi_handle_post_ebs_state();
+ 
++	status = mshv_launch();
++	if (status != EFI_SUCCESS) {
++		efi_err("Failed to launch MSHV\n");
++		return status;
++	}
++
+ 	efi_enter_kernel(kernel_addr, fdt_addr, fdt_totalsize((void *)fdt_addr));
+ 	/* not reached */
+ }
+diff --git a/drivers/firmware/efi/libstub/x86-efi-mshv.c b/drivers/firmware/efi/libstub/x86-efi-mshv.c
+new file mode 100644
+index 00000000000000..70753fdbe57c7b
+--- /dev/null
++++ b/drivers/firmware/efi/libstub/x86-efi-mshv.c
+@@ -0,0 +1,203 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++#include <asm/setup.h>
++
++#include "efistub.h"
++#include "efi-mshv.h"
++
++/* Initial number of MSHV reserved ranges, extended as needed */
++#define MSHV_RESERVED_RANGES_COUNT 16
++
++struct mshv_setup_data {
++	struct setup_data sd;
++	struct setup_indirect si;
++} __packed;
++
++static int mshv_realloc_ranges(struct resource **data,
++				unsigned long *data_sz, int nr_ranges)
++{
++	struct resource *new_data;
++	unsigned long new_sz;
++	int status;
++
++	new_sz = sizeof(struct resource) * nr_ranges;
++	status = efi_bs_call(allocate_pool, EFI_LOADER_DATA, new_sz,
++				(void **)&new_data);
++	if (status != EFI_SUCCESS) {
++		efi_err("mshv failed to allocate setup_data\n");
++		return status;
++	}
++
++	memset(new_data, 0, new_sz);
++	if (*data) {
++		memcpy(new_data, *data, *data_sz);
++		efi_bs_call(free_pool, *data);
++	}
++
++	*data = new_data;
++	*data_sz = new_sz;
++
++	return EFI_SUCCESS;
++}
++
++static efi_status_t mshv_populate_ranges(struct boot_params *boot_params,
++			efi_memory_desc_t *mem_map, unsigned long map_sz,
++			unsigned long desc_sz)
++{
++	unsigned long cmdline_ptr;
++	u32 cmdline_size;
++	static u8 mshv_cmdline[COMMAND_LINE_SIZE];
++
++	memset(mshv_cmdline, 0, sizeof(mshv_cmdline));
++
++	cmdline_ptr = boot_params->hdr.cmd_line_ptr;
++	cmdline_ptr |= (u64)boot_params->ext_cmd_line_ptr << 32;
++	cmdline_size = boot_params->hdr.cmdline_size;
++
++	mshv_efi_update_cmdline(mem_map, map_sz, desc_sz,
++				(char *)cmdline_ptr,
++				(char *)mshv_cmdline, COMMAND_LINE_SIZE);
++
++	boot_params->hdr.cmd_line_ptr = (u32)((unsigned long)mshv_cmdline);
++	boot_params->ext_cmd_line_ptr = (u32)((unsigned long)mshv_cmdline >> 32);
++	boot_params->hdr.cmdline_size = sizeof(mshv_cmdline);
++
++	return EFI_SUCCESS;
++}
++
++/*
++ * Prepare for running as root partition with mshv.
++ * - Open the hypervisor loader EFI protocol, used for launching mshv after
++ *   'exit boot services'.
++ * - Get mshv reserved memory ranges from the loader, and populates those
++ *   via a command line parameter 'hyperv_resvd_new'.
++ * If mshv_efi_setup() fails, boot continues as a bare-metal boot.
++ */
++efi_status_t mshv_efi_setup(struct boot_params *boot_params)
++{
++	struct setup_data **setup_data_itr;
++	struct mshv_setup_data *sd_block;
++	efi_memory_desc_t *mem_map;
++	unsigned long map_sz, desc_sz;
++	u64 start, end;
++	struct resource *mshv_range, *prev;
++	struct resource *mshv_reserved;
++	unsigned long mshv_reserved_sz;
++	u32 nr_desc;
++	int i, nr_ranges, max_ranges;
++	efi_status_t status;
++
++	mem_map = NULL;
++	mshv_reserved = NULL;
++
++	status = mshv_efi_init();
++	if (status == EFI_NOT_FOUND) {
++		/*
++		 * If the protocol is not installed
++		 * we are in a standard Linux boot
++		 */
++		return EFI_SUCCESS;
++	}
++
++	/*
++	 * Get mshv memory map to figure out mshv reserved ranges.
++	 */
++
++	map_sz = 0;
++	mshv_get_hv_ranges((void *)&mem_map, &map_sz, &desc_sz);
++
++	/*
++	 * Build an array of kernel 'struct resource' objects that contain mshv
++	 * reserved ranges. This array is populated via a command line parameter
++	 * called 'hyperv_resvd_new'.
++	 */
++
++	status = mshv_realloc_ranges(&mshv_reserved,
++				&mshv_reserved_sz,
++				MSHV_RESERVED_RANGES_COUNT);
++	if (status != EFI_SUCCESS)
++		mshv_efi_reboot("failed to allocate space for hv ranges with code %d",
++			status);
++
++	max_ranges = MSHV_RESERVED_RANGES_COUNT;
++	mshv_range = mshv_reserved;
++	prev = NULL;
++	nr_desc = map_sz / desc_sz;
++	for (i = 0, nr_ranges = 0; i < nr_desc; i++) {
++		efi_memory_desc_t *d;
++
++		d = efi_memdesc_ptr(mem_map, desc_sz, i);
++
++		/* Merge adjacent ranges */
++		if (prev && ((prev->end + 1) == d->phys_addr)) {
++			prev->end += (d->num_pages << PAGE_SHIFT);
++			continue;
++		}
++
++		mshv_range->name = "Hypervisor Code and Data";
++		mshv_range->flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM;
++		mshv_range->start = d->phys_addr;
++		mshv_range->end = d->phys_addr + (d->num_pages << PAGE_SHIFT) - 1;
++
++		prev = mshv_range++;
++		nr_ranges++;
++		if (nr_ranges >= max_ranges) {
++			/* Extend the array to accommodate more ranges */
++			max_ranges += MSHV_RESERVED_RANGES_COUNT;
++			status = mshv_realloc_ranges(&mshv_reserved, &mshv_reserved_sz,
++						max_ranges);
++			if (status != EFI_SUCCESS)
++				mshv_efi_reboot("failed to allocate space for "
++					"hv ranges with code %d", status);
++
++			prev = &mshv_reserved[nr_ranges-1];
++			mshv_range = prev + 1;
++		}
++	}
++
++	status = mshv_populate_ranges(boot_params, mem_map, map_sz, desc_sz);
++	if (status != EFI_SUCCESS)
++		mshv_efi_reboot("failed to allocate space for hv ranges with code %d",
++			status);
++
++	/* Build an indirect setup_data for each mshv reserved range. */
++	status = efi_bs_call(allocate_pool, EFI_LOADER_DATA,
++				nr_ranges * sizeof(struct mshv_setup_data),
++				(void **)&sd_block);
++	if (status != EFI_SUCCESS)
++		mshv_efi_reboot("failed to allocate space for "
++			"hv ranges: error code %d", status);
++
++	memset((void *)sd_block, 0, nr_ranges * sizeof(struct mshv_setup_data));
++	setup_data_itr = (struct setup_data **)&boot_params->hdr.setup_data;
++
++	while (*setup_data_itr && (*setup_data_itr)->next)
++		setup_data_itr = (struct setup_data **)&(*setup_data_itr)->next;
++
++	*setup_data_itr = (struct setup_data *)sd_block;
++
++	for (i = 0; i < nr_ranges; i++) {
++		start = mshv_reserved[i].start;
++		end = mshv_reserved[i].end;
++
++		sd_block[i].sd.type = SETUP_INDIRECT;
++		sd_block[i].sd.len  = sizeof(struct setup_indirect);
++		sd_block[i].sd.next = (__u64)&sd_block[i + 1];
++
++		sd_block[i].si.type = SETUP_MSHV;
++		sd_block[i].si.reserved = 0;
++		sd_block[i].si.len = end - start + 1;
++		sd_block[i].si.addr = start;
++	}
++
++	/*
++	 * Remove the trailing 'next' pointer which is currently
++	 * outside of the struct mshv_setup_data buffer.
++	 */
++
++	sd_block[nr_ranges - 1].sd.next = 0;
++
++	efi_bs_call(free_pool, mem_map);
++
++	return EFI_SUCCESS;
++}
+diff --git a/drivers/firmware/efi/libstub/x86-stub.c b/drivers/firmware/efi/libstub/x86-stub.c
+index cef32e2c82d8fd..86f8fb8144cb6c 100644
+--- a/drivers/firmware/efi/libstub/x86-stub.c
++++ b/drivers/firmware/efi/libstub/x86-stub.c
+@@ -20,6 +20,7 @@
+ 
+ #include "efistub.h"
+ #include "x86-stub.h"
++#include "efi-mshv.h"
+ 
+ extern char _bss[], _ebss[];
+ 
+@@ -737,6 +738,7 @@ static efi_status_t exit_boot_func(struct efi_boot_memmap *map,
+ 				   void *priv)
+ {
+ 	const char *signature;
++	efi_status_t status;
+ 	struct exit_boot_struct *p = priv;
+ 
+ 	signature = efi_is_64bit() ? EFI64_LOADER_SIGNATURE
+@@ -751,6 +753,12 @@ static efi_status_t exit_boot_func(struct efi_boot_memmap *map,
+ 			  &p->efi->efi_memmap, &p->efi->efi_memmap_hi);
+ 	p->efi->efi_memmap_size		= map->map_size;
+ 
++	/* Notify hypervisor of efi runtime services pages */
++	status = mshv_set_efi_rt_range(map);
++	if (status != EFI_SUCCESS)
++		return status;
++
++
+ 	return EFI_SUCCESS;
+ }
+ 
+@@ -918,7 +926,7 @@ void __noreturn efi_stub_entry(efi_handle_t handle,
+ 	const struct linux_efi_initrd *initrd = NULL;
+ 	unsigned long kernel_entry;
+ 	struct setup_header *hdr;
+-	efi_status_t status;
++	efi_status_t status, mshv_status;
+ 
+ 	efi_system_table = sys_table_arg;
+ 	/* Check if we were booted by the EFI firmware */
+@@ -1011,6 +1019,8 @@ void __noreturn efi_stub_entry(efi_handle_t handle,
+ 	/* Ask the firmware to clear memory on unclean shutdown */
+ 	efi_enable_reset_attack_mitigation();
+ 
++	mshv_status = mshv_efi_setup(boot_params);
++
+ 	efi_random_get_seed();
+ 
+ 	efi_retrieve_eventlog();
+@@ -1037,6 +1047,9 @@ void __noreturn efi_stub_entry(efi_handle_t handle,
+ 
+ 	efi_5level_switch();
+ 
++	if (mshv_status == EFI_SUCCESS)
++		mshv_launch();
++
+ 	enter_kernel(kernel_entry, boot_params);
+ fail:
+ 	efi_err("efi_stub_entry() failed!\n");
+diff --git a/drivers/hv/hv_common.c b/drivers/hv/hv_common.c
+index 6b67ac6167891c..9b78ee9afca629 100644
+--- a/drivers/hv/hv_common.c
++++ b/drivers/hv/hv_common.c
+@@ -30,6 +30,12 @@
+ #include <linux/set_memory.h>
+ #include <hyperv/hvhdk.h>
+ #include <asm/mshyperv.h>
++#include <linux/memblock.h>
++#include <linux/crash_dump.h>
++
++#define HV_MAX_RESVD_RANGES 32
++static struct resource hv_mshv_res[HV_MAX_RESVD_RANGES];
++static u32 ranges_nr;
+ 
+ u64 hv_current_partition_id = HV_PARTITION_ID_SELF;
+ EXPORT_SYMBOL_GPL(hv_current_partition_id);
+@@ -68,6 +74,7 @@ static void hv_kmsg_dump_unregister(void);
+ 
+ static struct ctl_table_header *hv_ctl_table_hdr;
+ 
++
+ /*
+  * Per-cpu array holding the tail pointer for the SynIC event ring buffer
+  * for each SINT.
+@@ -863,3 +870,60 @@ const char *hv_result_to_string(u64 status)
+ 	return "Unknown";
+ }
+ EXPORT_SYMBOL_GPL(hv_result_to_string);
++
++/*
++ * Parse "hyperv_resvd_new=<size>!<address>,<size>!<address>,...", specifying a
++ * list of memory ranges that are reserved by the loader for the hypervisor.
++ */
++static int __init hv_parse_hyperv_resvd_new(char *arg)
++{
++	unsigned long long region_start, region_sz;
++	int i = 0;
++	char *curr = arg;
++
++	if (is_kdump_kernel())
++		return 0;
++
++	while (*curr != 0) {
++		if (i >= HV_MAX_RESVD_RANGES) {
++			pr_err("Hyper-V: too many hyperv_resvd_new ranges specified: %s\n", arg);
++			BUG();
++		}
++
++		region_sz = simple_strtoull(curr, &curr, 16);
++		if (!region_sz) {
++			pr_err("Hyper-V: invalid format for hyperv_resvd_new: %s\n", arg);
++			BUG();
++		}
++
++		if (*curr != '!') {
++			pr_err("Hyper-V: invalid format for hyperv_resvd_new: %s\n", arg);
++			BUG();
++		}
++
++		++curr;
++
++		region_start = simple_strtoull(curr, &curr, 16);
++		if (region_start == 0) {
++			pr_err("Hyper-V: invalid format for hyperv_resvd_new: %s\n", arg);
++			BUG();
++		}
++
++		memblock_reserve(region_start, region_sz);
++
++		hv_mshv_res[i].name = "Hypervisor Code and Data";
++		hv_mshv_res[i].flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM;
++		hv_mshv_res[i].start = region_start;
++		hv_mshv_res[i].end = region_start + region_sz - 1;
++
++		if (*curr == ',')
++			++curr;
++
++		++i;
++	}
++
++	ranges_nr = i;
++
++	return 0;
++}
++early_param("hyperv_resvd_new", hv_parse_hyperv_resvd_new);
+diff --git a/include/linux/efi.h b/include/linux/efi.h
+index 664898d09ff572..5616ba22ebef05 100644
+--- a/include/linux/efi.h
++++ b/include/linux/efi.h
+@@ -404,6 +404,7 @@ void efi_native_runtime_setup(void);
+ #define EFI_CC_BLOB_GUID			EFI_GUID(0x067b1f5f, 0xcf26, 0x44c5, 0x85, 0x54, 0x93, 0xd7, 0x77, 0x91, 0x2d, 0x42)
+ #define EFI_CC_MEASUREMENT_PROTOCOL_GUID	EFI_GUID(0x96751a3d, 0x72f4, 0x41a6, 0xa7, 0x94, 0xed, 0x5d, 0x0e, 0x67, 0xae, 0x6b)
+ #define EFI_CC_FINAL_EVENTS_TABLE_GUID		EFI_GUID(0xdd4a4648, 0x2de7, 0x4665, 0x96, 0x4d, 0x21, 0xd9, 0xef, 0x5f, 0xb4, 0x46)
++#define EFI_MSHV_MEDIA_PROTOCOL_GUID	EFI_GUID(0x098d423a, 0x6ca5, 0x4ad4, 0x90, 0xfa, 0x72, 0xc3, 0xce, 0x22, 0xc8, 0xd0)
+ 
+ /*
+  * This GUIDs are used to pass to the kernel proper the primary
