@@ -29,10 +29,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  MS_REPO_URL: "https://packages.microsoft.com/azurelinux/3.0/prod/non-oss/x86_64"
+  MS_REPO_BASE_URL: "https://packages.microsoft.com/azurelinux/3.0/prod"
   # RPMs we want to repackage. If Microsoft renames or splits them this list
   # is the single point of change.
-  MS_RPMS: "hypervisor hyperv-firmware"
+  MS_RPMS: "mshv-bootloader-lx mshv"
 
 jobs:
   build:
@@ -53,24 +53,46 @@ jobs:
             rpm rpm2cpio cpio gnupg2 curl wget xz-utils \
             ca-certificates jq python3
 
-      - name: Resolve latest RPM URLs
+      - name: Resolve latest HvLoader RPM URL
+        run: |
+          set -euo pipefail
+          # The base feed exposes a simple directory listing. Scrape it
+          # for the newest RPM matching each package name.
+          HVLOADER_URL=${MS_REPO_BASE_URL}/base/x86_64/Packages/h
+          INDEX="$(curl -fsSL "${HVLOADER_URL}/")"
+          mkdir -p downloads
+          pkg="hvloader"
+          CANDIDATES="$(printf '%s\n' "$INDEX" \
+            | grep -oE "${pkg}-[0-9][^\"']*\.rpm" \
+            | sort -uV)"
+          if [ -z "$CANDIDATES" ]; then
+            echo "::error::No RPMs found for '${pkg}' at ${HVLOADER_URL}/"
+            exit 1
+          fi
+          RPM="$(printf '%s\n' "$CANDIDATES" | tail -n1)"
+          echo "Latest ${pkg}: ${RPM}"
+          curl -fsSL -o "downloads/${RPM}" "${HVLOADER_URL}/${RPM}"
+          ls -lh downloads/
+
+      - name: Resolve latest Hyper-V RPM URLs
         run: |
           set -euo pipefail
           # The non-oss feed exposes a simple directory listing. Scrape it
           # for the newest RPM matching each package name.
-          INDEX="$(curl -fsSL "${MS_REPO_URL}/")"
+          NON_OSS_URL=${MS_REPO_BASE_URL}/ms-non-oss/x86_64/Packages/m
+          INDEX="$(curl -fsSL "${NON_OSS_URL}/")"
           mkdir -p downloads
           for pkg in $MS_RPMS; do
             CANDIDATES="$(printf '%s\n' "$INDEX" \
               | grep -oE "${pkg}-[0-9][^\"']*\.rpm" \
               | sort -uV)"
             if [ -z "$CANDIDATES" ]; then
-              echo "::error::No RPMs found for '${pkg}' at ${MS_REPO_URL}/"
+              echo "::error::No RPMs found for '${pkg}' at ${NON_OSS_URL}/"
               exit 1
             fi
             RPM="$(printf '%s\n' "$CANDIDATES" | tail -n1)"
             echo "Latest ${pkg}: ${RPM}"
-            curl -fsSL -o "downloads/${RPM}" "${MS_REPO_URL}/${RPM}"
+            curl -fsSL -o "downloads/${RPM}" "${NON_OSS_URL}/${RPM}"
           done
           ls -lh downloads/
 
@@ -80,7 +102,7 @@ jobs:
           set -euo pipefail
           # Reuse the upstream hypervisor RPM's version-release so apt picks
           # up new Microsoft drops automatically.
-          HV_RPM="$(ls downloads/hypervisor-*.rpm | head -n1)"
+          HV_RPM="$(ls downloads/*.rpm | head -n1)"
           VR="$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$HV_RPM" \
             2>/dev/null || true)"
           if [ -z "$VR" ]; then
@@ -100,40 +122,17 @@ jobs:
           for rpm in downloads/*.rpm; do
             (cd stage && rpm2cpio "../$rpm" | cpio -idm)
           done
-          # Sanity: hvloader.efi must be present, otherwise everything
+          # Sanity: HvLoader.efi must be present, otherwise everything
           # downstream is pointless.
-          find stage -name 'hvloader.efi' -print | head -n1 \
+          find stage -name 'HvLoader.efi' -print | head -n1 \
             | grep -q . || { echo "::error::hvloader.efi missing in hypervisor RPM"; exit 1; }
 
       - name: Build hyperv .deb
         run: |
           set -euo pipefail
           ROOT="build/hyperv"
-          mkdir -p "$ROOT/DEBIAN" \
-                   "$ROOT/usr/lib/hyperv" \
-                   "$ROOT/usr/lib/firmware/hyperv"
-          # Drop hypervisor payload under /usr/lib/hyperv. The upstream RPM
-          # uses /usr/share; we collapse everything onto /usr/lib/hyperv so
-          # the postinst hook can find hvloader.efi at a stable path.
-          if [ -d stage/usr/share/hypervisor ]; then
-            cp -a stage/usr/share/hypervisor/. "$ROOT/usr/lib/hyperv/"
-          fi
-          # Firmware blobs.
-          if [ -d stage/usr/lib/firmware ]; then
-            cp -a stage/usr/lib/firmware/. "$ROOT/usr/lib/firmware/"
-          fi
-          if [ -d stage/usr/share/firmware ]; then
-            cp -a stage/usr/share/firmware/. "$ROOT/usr/lib/firmware/"
-          fi
-          # Promote hvloader.efi to a stable path the postinst expects.
-          HVLOADER="$(find "$ROOT" -name hvloader.efi | head -n1)"
-          if [ -n "$HVLOADER" ] && [ "$HVLOADER" != "$ROOT/usr/lib/hyperv/hvloader.efi" ]; then
-            install -D -m 0644 "$HVLOADER" "$ROOT/usr/lib/hyperv/hvloader.efi"
-          fi
-          install -m 0755 packaging/hyperv/scripts/register-loader.sh \
-            "$ROOT/usr/lib/hyperv/register-loader.sh"
-          install -m 0755 packaging/hyperv/scripts/unregister-loader.sh \
-            "$ROOT/usr/lib/hyperv/unregister-loader.sh"
+          mkdir -p "$ROOT/DEBIAN"
+          mv stage/* $ROOT/
 
           cat > "$ROOT/DEBIAN/control" <<EOF
           Package: hyperv
@@ -150,18 +149,6 @@ jobs:
            3.0/prod/non-oss/. The postinst installs hvloader.efi onto the
            ESP and registers a systemd-boot entry that chainloads it.
           EOF
-
-          cat > "$ROOT/DEBIAN/postinst" <<'EOF'
-          #!/bin/sh
-          set -e
-          /usr/lib/hyperv/register-loader.sh || true
-          EOF
-          cat > "$ROOT/DEBIAN/prerm" <<'EOF'
-          #!/bin/sh
-          set -e
-          /usr/lib/hyperv/unregister-loader.sh || true
-          EOF
-          chmod 0755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/prerm"
 
           mkdir -p out
           dpkg-deb --build --root-owner-group "$ROOT" out/
@@ -187,5 +174,6 @@ jobs:
         uses: ./.github/actions/publish-apt
         with:
           debs_glob: "out/hyperv_*_amd64.deb"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           gpg_private_key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          gpg_passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
+          gpg_passphrase: ""

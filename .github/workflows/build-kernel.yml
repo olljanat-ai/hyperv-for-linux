@@ -395,22 +395,14 @@ jobs:
         if: steps.dedupe.outputs.skip != 'true'
         run: ccache -s || true
 
-      - name: Upload .deb artifacts
-        if: steps.dedupe.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: hyperv-kernel-${{ env.UBUNTU_SERIES }}-${{ steps.kver.outputs.version }}
-          path: out/*.deb
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Publish to apt repository
         if: steps.dedupe.outputs.skip != 'true'
         uses: ./.github/actions/publish-apt
         with:
-          debs_glob: "out/linux-image-*-hyperv_*_amd64.deb"
+          debs_glob: "out/linux-image-7.0.0-hyperv-*_amd64.deb"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           gpg_private_key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          gpg_passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
+          gpg_passphrase: ""
 
       - name: Tag this Ubuntu kernel version
         if: steps.dedupe.outputs.skip != 'true'

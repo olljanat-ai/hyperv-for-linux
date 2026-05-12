@@ -20,6 +20,9 @@ inputs:
     description: Debian architecture string (e.g. amd64).
     required: false
     default: amd64
+  github_token:
+    description: GitHub token
+    required: true
   gpg_private_key:
     description: ASCII-armored GPG private key used to sign Release.
     required: true
@@ -75,9 +78,10 @@ runs:
       shell: bash
       env:
         PAGES_BRANCH: ${{ inputs.pages_branch }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         set -euo pipefail
-        REPO_URL="https://x-access-token:${GH_TOKEN_FOR_PUSH:-${GITHUB_TOKEN}}@github.com/${GITHUB_REPOSITORY}.git"
+        REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
         rm -rf apt-repo
         git clone --branch "$PAGES_BRANCH" --depth 1 "$REPO_URL" apt-repo \
           || git clone --depth 1 "$REPO_URL" apt-repo
