@@ -11,7 +11,11 @@ CONFIG_MSHV_ROOT=m
 
 # --- Hyper-V common bits -------------------------------------------------
 CONFIG_HYPERV=y
-CONFIG_HYPERV_VSOCKETS=y
+# VSOCKETS is the AF_VSOCK core; HYPERV_VSOCKETS and VHOST_VSOCK both
+# 'depends on VSOCKETS', so without this Ubuntu's "not set" base wins and
+# olddefconfig silently drops both transports.
+CONFIG_VSOCKETS=m
+CONFIG_HYPERV_VSOCKETS=m
 CONFIG_HYPERV_TIMER=y
 CONFIG_HYPERV_UTILS=m
 CONFIG_HYPERV_BALLOON=m
