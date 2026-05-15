@@ -10,13 +10,15 @@ set -eu
 
 ENTRY_ID="hyperv"
 ENTRY_TITLE="Ubuntu with Microsoft Hypervisor"
-HV_PATH="/usr/lib/hyperv/hvloader.efi"
 ESP="$(bootctl --print-esp-path 2>/dev/null || true)"
 
 log() { echo "hyperv-register-loader: $*" >&2; }
 
-if [ ! -f "$HV_PATH" ]; then
-    log "$HV_PATH missing — hyperv-hypervisor not installed?"
+# Locate the loader binary wherever the upstream RPM dropped it (path has
+# varied between Microsoft releases).
+HV_PATH="$(find /usr -name 'HvLoader.efi' -type f 2>/dev/null | head -n1)"
+if [ -z "$HV_PATH" ] || [ ! -f "$HV_PATH" ]; then
+    log "HvLoader.efi not found on disk — postinst download didn't run?"
     exit 0
 fi
 
@@ -33,13 +35,13 @@ fi
 # Copy the loader binary into the ESP so the firmware can read it without
 # crossing filesystem boundaries during boot.
 install -d "$ESP/EFI/hyperv"
-install -m 0644 "$HV_PATH" "$ESP/EFI/hyperv/hvloader.efi"
+install -m 0644 "$HV_PATH" "$ESP/EFI/hyperv/HvLoader.efi"
 
 # Drop a boot entry that points at it.
 install -d "$ESP/loader/entries"
 cat > "$ESP/loader/entries/${ENTRY_ID}.conf" <<EOF
 title    ${ENTRY_TITLE}
-efi      /EFI/hyperv/hvloader.efi
+efi      /EFI/hyperv/HvLoader.efi
 EOF
 
 log "registered systemd-boot entry '${ENTRY_ID}' at $ESP/loader/entries/${ENTRY_ID}.conf"

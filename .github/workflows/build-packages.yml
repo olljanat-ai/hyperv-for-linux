@@ -1,14 +1,17 @@
 name: Build Hyper-V package
 
-# Repackages the closed-source Microsoft Hypervisor bits from the Azure
-# Linux 3.0 non-oss repository into a single 'hyperv' .deb targeting
-# Ubuntu 26.04. The .deb contains:
-#   * the hypervisor loader and its private payload (under /usr/lib/hyperv/)
-#   * firmware blobs needed at boot (under /usr/lib/firmware/hyperv/)
-#   * a postinst hook that installs hvloader.efi onto the ESP and registers
-#     a systemd-boot entry that chainloads it.
+# Builds the 'hyperv' meta-package: a .deb that ships NO Microsoft
+# binaries, only the maintainer scripts and a pinned-URL manifest.
+# The postinst downloads the Microsoft Hypervisor + firmware RPMs from
+# packages.microsoft.com at install time and extracts them onto the
+# target machine. That keeps the actual redistribution of the
+# closed-source bits on the end-user, where their Microsoft license
+# acceptance lives (issue #6).
 #
-# Run weekly so newly published Microsoft drops get picked up.
+# Run weekly so newly published Microsoft drops are picked up: each
+# workflow run re-scrapes the upstream feeds, pins the latest URLs into
+# sources.conf, and ships a new .deb whose version mirrors the upstream
+# RPM Version-Release so apt upgrade triggers a fresh download.
 
 on:
   workflow_dispatch:
@@ -30,14 +33,15 @@ concurrency:
 
 env:
   MS_REPO_BASE_URL: "https://packages.microsoft.com/azurelinux/3.0/prod"
-  # RPMs we want to repackage. If Microsoft renames or splits them this list
-  # is the single point of change.
-  MS_RPMS: "mshv-bootloader-lx mshv"
+  # Non-oss RPMs to pin (closed-source Microsoft Hypervisor payload).
+  MS_NON_OSS_RPMS: "mshv-bootloader-lx mshv"
+  # base/ RPMs to pin (the EFI loader stub).
+  MS_BASE_RPMS: "hvloader"
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       DEBIAN_FRONTEND: noninteractive
 
@@ -50,89 +54,81 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential debhelper devscripts dpkg-dev fakeroot \
-            rpm rpm2cpio cpio gnupg2 curl wget xz-utils \
-            ca-certificates jq python3
+            curl ca-certificates
 
-      - name: Resolve latest HvLoader RPM URL
+      - name: Resolve latest upstream RPM URLs
+        id: resolve
         run: |
           set -euo pipefail
-          # The base feed exposes a simple directory listing. Scrape it
-          # for the newest RPM matching each package name.
-          HVLOADER_URL=${MS_REPO_BASE_URL}/base/x86_64/Packages/h
-          INDEX="$(curl -fsSL "${HVLOADER_URL}/")"
-          mkdir -p downloads
-          pkg="hvloader"
-          CANDIDATES="$(printf '%s\n' "$INDEX" \
-            | grep -oE "${pkg}-[0-9][^\"']*\.rpm" \
-            | sort -uV)"
-          if [ -z "$CANDIDATES" ]; then
-            echo "::error::No RPMs found for '${pkg}' at ${HVLOADER_URL}/"
-            exit 1
-          fi
-          RPM="$(printf '%s\n' "$CANDIDATES" | tail -n1)"
-          echo "Latest ${pkg}: ${RPM}"
-          curl -fsSL -o "downloads/${RPM}" "${HVLOADER_URL}/${RPM}"
-          ls -lh downloads/
 
-      - name: Resolve latest Hyper-V RPM URLs
-        run: |
-          set -euo pipefail
-          # The non-oss feed exposes a simple directory listing. Scrape it
-          # for the newest RPM matching each package name.
-          NON_OSS_URL=${MS_REPO_BASE_URL}/ms-non-oss/x86_64/Packages/m
-          INDEX="$(curl -fsSL "${NON_OSS_URL}/")"
-          mkdir -p downloads
-          for pkg in $MS_RPMS; do
-            CANDIDATES="$(printf '%s\n' "$INDEX" \
+          mkdir -p urls
+          : > urls/sources.conf
+          : > urls/hv-rpm-name
+
+          resolve_one() {
+            local base="$1"
+            local pkg="$2"
+            local index candidates rpm
+            index="$(curl -fsSL "${base}/")"
+            candidates="$(printf '%s\n' "$index" \
               | grep -oE "${pkg}-[0-9][^\"']*\.rpm" \
               | sort -uV)"
-            if [ -z "$CANDIDATES" ]; then
-              echo "::error::No RPMs found for '${pkg}' at ${NON_OSS_URL}/"
+            if [ -z "$candidates" ]; then
+              echo "::error::No RPMs found for '${pkg}' at ${base}/"
               exit 1
             fi
-            RPM="$(printf '%s\n' "$CANDIDATES" | tail -n1)"
-            echo "Latest ${pkg}: ${RPM}"
-            curl -fsSL -o "downloads/${RPM}" "${NON_OSS_URL}/${RPM}"
+            rpm="$(printf '%s\n' "$candidates" | tail -n1)"
+            echo "Latest ${pkg}: ${rpm}"
+            echo "${base}/${rpm}" >> urls/sources.conf
+            # The version of the 'mshv' RPM drives the .deb version.
+            if [ "$pkg" = "mshv" ]; then
+              echo "${rpm}" > urls/hv-rpm-name
+            fi
+          }
+
+          for pkg in $MS_BASE_RPMS; do
+            resolve_one "${MS_REPO_BASE_URL}/base/x86_64/Packages/h" "${pkg}"
           done
-          ls -lh downloads/
+          for pkg in $MS_NON_OSS_RPMS; do
+            resolve_one "${MS_REPO_BASE_URL}/ms-non-oss/x86_64/Packages/m" "${pkg}"
+          done
+
+          echo "=== pinned URLs ==="
+          cat urls/sources.conf
 
       - name: Derive package version
         id: version
         run: |
           set -euo pipefail
-          # Reuse the upstream hypervisor RPM's version-release so apt picks
-          # up new Microsoft drops automatically.
-          HV_RPM="$(ls downloads/*.rpm | head -n1)"
-          VR="$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$HV_RPM" \
-            2>/dev/null || true)"
-          if [ -z "$VR" ]; then
-            BN="$(basename "$HV_RPM" .rpm)"
-            VR="${BN#hypervisor-}"
-            VR="${VR%.x86_64}"
-          fi
+          # Mirror the upstream hypervisor RPM's version-release so apt
+          # picks up new Microsoft drops automatically. The RPM *name*
+          # already carries version-release; no need to download the
+          # payload just to read it.
+          NAME="$(cat urls/hv-rpm-name)"
+          VR="${NAME#mshv-}"
+          VR="${VR%.x86_64.rpm}"
           # Debian rejects characters outside [A-Za-z0-9.+:~-]; normalise.
           DEB_VERSION="$(echo "$VR" | tr -c 'A-Za-z0-9.+:~-' '.')~ms1"
           echo "deb_version=${DEB_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Debian version: ${DEB_VERSION}"
 
-      - name: Extract RPM payloads
-        run: |
-          set -euo pipefail
-          mkdir -p stage
-          for rpm in downloads/*.rpm; do
-            (cd stage && rpm2cpio "../$rpm" | cpio -idm)
-          done
-          # Sanity: HvLoader.efi must be present, otherwise everything
-          # downstream is pointless.
-          find stage -name 'HvLoader.efi' -print | head -n1 \
-            | grep -q . || { echo "::error::hvloader.efi missing in hypervisor RPM"; exit 1; }
-
-      - name: Build hyperv .deb
+      - name: Stage meta-package tree
         run: |
           set -euo pipefail
           ROOT="build/hyperv"
-          mkdir -p "$ROOT/DEBIAN"
-          mv stage/* $ROOT/
+          mkdir -p "$ROOT/DEBIAN" \
+                   "$ROOT/usr/lib/hyperv" \
+                   "$ROOT/usr/share/doc/hyperv"
+
+          # Scripts that run at install / removal time.
+          install -m 0755 packaging/hyperv/scripts/download-binaries.sh "$ROOT/usr/lib/hyperv/"
+          install -m 0755 packaging/hyperv/scripts/register-loader.sh   "$ROOT/usr/lib/hyperv/"
+          install -m 0755 packaging/hyperv/scripts/unregister-loader.sh "$ROOT/usr/lib/hyperv/"
+
+          # Pinned RPM URLs the postinst downloads. Regenerated on every
+          # workflow run, so 'apt upgrade' will fetch fresh Microsoft
+          # drops via this manifest.
+          install -m 0644 urls/sources.conf "$ROOT/usr/lib/hyperv/sources.conf"
 
           cat > "$ROOT/DEBIAN/control" <<EOF
           Package: hyperv
@@ -141,17 +137,38 @@ jobs:
           Priority: optional
           Architecture: amd64
           Maintainer: hyperv-for-linux maintainers <noreply@example.invalid>
-          Depends: systemd
+          Depends: systemd, curl, ca-certificates, libarchive-tools
           Recommends: linux-image-hyperv
-          Description: Microsoft Hypervisor for Linux (repackaged from Azure Linux non-oss)
-           Ships the Microsoft Hypervisor loader, supporting payload, and
-           firmware blobs, repackaged from packages.microsoft.com/azurelinux/
-           3.0/prod/non-oss/. The postinst installs hvloader.efi onto the
-           ESP and registers a systemd-boot entry that chainloads it.
+          Description: Microsoft Hypervisor for Linux (installer meta-package)
+           Downloads the Microsoft Hypervisor loader and firmware blobs
+           from packages.microsoft.com/azurelinux/3.0/prod/ at install
+           time and registers a systemd-boot entry that chainloads
+           HvLoader.efi from the ESP.
+           .
+           The Microsoft binaries are NOT redistributed by this package;
+           the postinst fetches them on the target machine, where the
+           user accepts Microsoft's license at install time.
           EOF
+
+          install -m 0755 packaging/hyperv/debian/postinst "$ROOT/DEBIAN/postinst"
+          install -m 0755 packaging/hyperv/debian/prerm    "$ROOT/DEBIAN/prerm"
+          install -m 0755 packaging/hyperv/debian/postrm   "$ROOT/DEBIAN/postrm"
 
           mkdir -p out
           dpkg-deb --build --root-owner-group "$ROOT" out/
+
+      - name: Verify .deb ships no upstream binaries
+        run: |
+          set -euo pipefail
+          # Belt-and-braces: the whole point of this rework is that no
+          # Microsoft binary leaves CI inside our .deb. Fail loudly if
+          # something snuck back in.
+          for deb in out/*.deb; do
+            if dpkg-deb -c "$deb" | grep -E '\.(efi|bin|so)\b'; then
+              echo "::error::$deb contains binary artifacts; meta-package must be source-free"
+              exit 1
+            fi
+          done
 
       - name: List built package
         run: |
@@ -159,7 +176,7 @@ jobs:
           for deb in out/*.deb; do
             echo "=== $deb ==="
             dpkg-deb -I "$deb"
-            dpkg-deb -c "$deb" | head -n 20
+            dpkg-deb -c "$deb"
           done
 
       - name: Upload .deb artifact

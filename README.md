@@ -28,7 +28,7 @@ Two packages:
 | Package              | Contents                                                  |
 | -------------------- | --------------------------------------------------------- |
 | `linux-image-hyperv` | Ubuntu's own kernel rebuilt with `MSHV_ROOT` + Hyper-V drivers, plus the mandatory MSHV EFI loader patch. |
-| `hyperv`             | Microsoft Hypervisor binaries + firmware, repackaged from `packages.microsoft.com/azurelinux/3.0/prod/non-oss/`. Installs `hvloader.efi` onto the ESP and registers a `systemd-boot` entry. |
+| `hyperv`             | Meta-package whose `postinst` downloads Microsoft Hypervisor + firmware from `packages.microsoft.com/azurelinux/3.0/prod/` on the target machine, extracts them locally, and registers a `systemd-boot` entry. Ships no Microsoft binaries itself. |
 
 ## Installing
 
@@ -98,19 +98,27 @@ clobber each other; the publish action retries with rebase on conflict.
   attaches `git am` logs as an artifact, and tags it
   `kernel-patch-fail` + `automated`.
 
-### Hyper-V binaries pipeline (`build-packages.yml`)
+### Hyper-V meta-package pipeline (`build-packages.yml`)
 
-- Scrapes the Azure Linux 3.0 `non-oss` repo for the newest
-  `hypervisor` and `hyperv-firmware` RPMs.
-- Extracts the payloads with `rpm2cpio | cpio` — never installs.
-- Re-emits a single `hyperv` `.deb` containing `/usr/lib/hyperv/`
-  (hypervisor + loader scripts) and `/usr/lib/firmware/hyperv/`
-  (firmware blobs). `postinst` copies `hvloader.efi` to the ESP and
-  writes a `systemd-boot` entry.
-- Versioning mirrors the upstream RPM `Version-Release` with a
-  `~ms1` suffix so `apt upgrade` picks up new Microsoft drops
+- Scrapes the Azure Linux 3.0 `base/` and `ms-non-oss/` repos for the
+  newest `hvloader`, `mshv-bootloader-lx`, and `mshv` RPMs — but only
+  to **resolve their URLs**, never to download or repackage the
+  payloads. Doing so on our infrastructure would violate Microsoft's
+  redistribution terms (see issue #6).
+- Emits a single `hyperv` `.deb` that ships only the maintainer
+  scripts (`download-binaries.sh`, `register-loader.sh`,
+  `unregister-loader.sh`) and the resolved URLs in `sources.conf`.
+  A CI guard fails the build if a `.efi` / `.bin` / `.so` file
+  somehow appears inside the `.deb`.
+- On the target machine, `postinst` runs `download-binaries.sh`
+  (which `curl`s the pinned RPMs and extracts them with `bsdtar`
+  straight onto `/`), then `register-loader.sh` to copy
+  `HvLoader.efi` onto the ESP and write a `systemd-boot` entry.
+- `postrm` scrubs the downloaded binaries on `remove` / `purge`.
+- Versioning mirrors the upstream `mshv` RPM `Version-Release` with a
+  `~ms1` suffix; a weekly workflow run regenerates `sources.conf` and
+  the `.deb` version, so `apt upgrade` picks up new Microsoft drops
   automatically.
-- Polls weekly.
 
 ## Repository layout
 
@@ -126,8 +134,8 @@ packaging/
     config.fragment        # CONFIG_* additions
     patches/               # <NN>-<subject>.patch, applied with git am --3way
   hyperv/
-    debian/control.in      # Reference Debian source-package control
-    scripts/               # postinst / postrm loader registration
+    debian/                # control.in + postinst / prerm / postrm
+    scripts/               # download-binaries + boot-loader register/unregister
 scripts/
   generate-signing-key.sh  # One-shot apt-repo signing-key generator
 README.md
@@ -234,6 +242,9 @@ the green button manually from **Actions → Build Hyper-V kernel
 
 ## License
 
-The repository itself is MIT-licensed (see `LICENSE`). The repackaged
-Microsoft binaries retain their original Microsoft licensing; you are
-the one accepting that license when you install the `hyperv` package.
+The repository itself is MIT-licensed (see `LICENSE`). No Microsoft
+binaries are redistributed by this repo or by the `hyperv` `.deb` it
+publishes; the `.deb` is a meta-package whose `postinst` downloads the
+binaries from `packages.microsoft.com` directly onto your machine, so
+the Microsoft license is the one you accept at install time, not via
+us.

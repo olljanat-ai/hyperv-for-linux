@@ -8,10 +8,14 @@ Homepage: https://github.com/olljanat-ai/hyperv-for-linux
 
 Package: hyperv
 Architecture: amd64
-Depends: ${misc:Depends}, systemd
+Depends: ${misc:Depends}, systemd, curl, ca-certificates, libarchive-tools
 Recommends: linux-image-hyperv
-Description: Microsoft Hypervisor for Linux (repackaged from Azure Linux non-oss)
- Ships the Microsoft Hypervisor loader, supporting payload, and firmware
- blobs, repackaged from packages.microsoft.com/azurelinux/3.0/prod/non-oss/.
- The postinst installs hvloader.efi onto the ESP and registers a
- systemd-boot entry that chainloads it.
+Description: Microsoft Hypervisor for Linux (installer meta-package)
+ Downloads the Microsoft Hypervisor loader and firmware blobs from
+ packages.microsoft.com/azurelinux/3.0/prod/ at install time and
+ registers a systemd-boot entry that chainloads HvLoader.efi from the
+ ESP.
+ .
+ The Microsoft binaries are NOT redistributed by this package; the
+ postinst fetches them on the target machine, where the user accepts
+ Microsoft's license at install time.
