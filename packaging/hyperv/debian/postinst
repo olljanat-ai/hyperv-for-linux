@@ -1,0 +1,21 @@
+#!/bin/sh
+# Fetch the Microsoft Hypervisor binaries from packages.microsoft.com and
+# wire them into the boot loader. The .deb itself ships no Microsoft
+# binaries (issue #6).
+
+set -e
+
+case "$1" in
+    configure)
+        /usr/lib/hyperv/download-binaries.sh
+        /usr/lib/hyperv/register-loader.sh || true
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

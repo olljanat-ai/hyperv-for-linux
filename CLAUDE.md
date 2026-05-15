@@ -206,22 +206,44 @@ and (if it applies) tag + publish a fresh `linux-image-hyperv` deb.
 
 ## `hyperv` package conventions
 
-- Source RPMs come from
-  `https://packages.microsoft.com/azurelinux/3.0/prod/non-oss/x86_64/`.
-  Repo is scraped (no real index); newest RPM by `sort -V` wins. The
-  current list is `hypervisor` and `hyperv-firmware`; if Microsoft adds
-  more, extend `MS_RPMS` in `build-packages.yml`.
-- Extract with `rpm2cpio | cpio` – never `rpm -i`; we want the raw
-  payload, not a system-level install.
-- Single `.deb` named `hyperv`. Payload:
-  - `/usr/lib/hyperv/`              – hypervisor binaries (`hvloader.efi`)
-  - `/usr/lib/firmware/hyperv/`     – firmware blobs
-  - `/usr/lib/hyperv/{register,unregister}-loader.sh` – boot hooks
-- `postinst` runs `register-loader.sh`: copies `hvloader.efi` to
-  `<ESP>/EFI/hyperv/` and writes a systemd-boot entry. `prerm` runs
-  `unregister-loader.sh` and removes only what we wrote.
-- Package version mirrors the upstream RPM `Version-Release` with a
-  `~ms1` suffix so `apt upgrade` picks up new drops automatically.
+**The `.deb` ships NO Microsoft binaries** — it is a *meta-package*.
+Redistributing the closed-source Hyper-V bits inside our own apt repo
+would violate Microsoft's license (issue #6), so the binaries are
+fetched by the end-user at install time, on their own machine, where
+they implicitly accept the Microsoft license.
+
+- The workflow only *scrapes* upstream feeds to learn the latest RPM
+  URLs:
+  - `https://packages.microsoft.com/azurelinux/3.0/prod/base/x86_64/Packages/h/`
+    for `hvloader`
+  - `https://packages.microsoft.com/azurelinux/3.0/prod/ms-non-oss/x86_64/Packages/m/`
+    for `mshv-bootloader-lx` and `mshv`
+- It pins the resolved URLs into `urls/sources.conf` and ships only
+  that manifest plus the maintainer scripts. If Microsoft adds more
+  RPMs, extend `MS_BASE_RPMS` / `MS_NON_OSS_RPMS` in
+  `build-packages.yml`.
+- A CI guard fails the build if a `.efi`, `.bin`, or `.so` file ever
+  appears inside the resulting `.deb`.
+- Payload (entirely scripts + config, no upstream binaries):
+  - `/usr/lib/hyperv/download-binaries.sh`     – postinst-time fetcher
+  - `/usr/lib/hyperv/register-loader.sh`       – boot hook
+  - `/usr/lib/hyperv/unregister-loader.sh`     – boot hook
+  - `/usr/lib/hyperv/sources.conf`             – pinned RPM URLs
+- Maintainer scripts:
+  - `postinst configure`: `download-binaries.sh` (curl + bsdtar to
+    extract RPMs straight onto `/`) then `register-loader.sh`.
+  - `prerm remove`: `unregister-loader.sh`.
+  - `postrm remove|purge`: scrubs the non-dpkg-owned files the
+    postinst pulled down (`HvLoader.efi`, `/usr/lib/firmware/hyperv/`,
+    …).
+- Runtime dependencies: `systemd, curl, ca-certificates,
+  libarchive-tools` — `bsdtar` (from `libarchive-tools`) handles the
+  RPM extraction so we don't need to pull in `rpm`.
+- Package version mirrors the upstream `mshv` RPM `Version-Release`
+  with a `~ms1` suffix so `apt upgrade` picks up new drops
+  automatically: each weekly workflow run regenerates `sources.conf`
+  with whatever's newest upstream, and the resulting `.deb` version
+  bumps in lockstep.
 
 ## Development branch
 

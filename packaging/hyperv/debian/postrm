@@ -1,0 +1,29 @@
+#!/bin/sh
+# Scrub the Microsoft binaries the postinst pulled down. They're not in
+# dpkg's manifest (the .deb ships none), so dpkg won't remove them for us.
+
+set -e
+
+case "$1" in
+    remove|purge)
+        rm -f /usr/lib/hyperv/HvLoader.efi /usr/lib/hyperv/hvloader.efi
+        rm -rf /usr/lib/firmware/hyperv
+        # Anything else the upstream RPMs dropped under /usr/lib/hyperv
+        # that wasn't shipped by us.
+        find /usr/lib/hyperv -maxdepth 1 -type f \
+            ! -name 'download-binaries.sh' \
+            ! -name 'register-loader.sh' \
+            ! -name 'unregister-loader.sh' \
+            ! -name 'sources.conf' \
+            -delete 2>/dev/null || true
+        rmdir /usr/lib/hyperv 2>/dev/null || true
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

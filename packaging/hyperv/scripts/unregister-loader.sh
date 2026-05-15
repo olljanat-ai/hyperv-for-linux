@@ -12,5 +12,5 @@ if [ -z "$ESP" ] || [ ! -d "$ESP" ]; then
 fi
 
 rm -f "$ESP/loader/entries/${ENTRY_ID}.conf"
-rm -f "$ESP/EFI/hyperv/hvloader.efi"
+rm -f "$ESP/EFI/hyperv/HvLoader.efi" "$ESP/EFI/hyperv/hvloader.efi"
 rmdir "$ESP/EFI/hyperv" 2>/dev/null || true
