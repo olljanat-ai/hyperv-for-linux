@@ -1,0 +1,5 @@
+Archive: stable
+Component: main
+Origin: hyperv-for-linux
+Label: hyperv-for-linux
+Architecture: amd64

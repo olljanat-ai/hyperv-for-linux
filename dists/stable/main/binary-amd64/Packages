@@ -1,0 +1,24 @@
+Package: hyperv
+Architecture: amd64
+Version: 27744.1000.2411011329.1-1.azl3.~ms1
+Priority: optional
+Section: admin
+Maintainer: hyperv-for-linux maintainers <noreply@example.invalid>
+Depends: systemd, curl, ca-certificates, libarchive-tools
+Recommends: linux-image-hyperv
+Filename: pool/main/h/hyperv/hyperv_27744.1000.2411011329.1-1.azl3.~ms1_amd64.deb
+Size: 3390
+MD5sum: d38e98a672c139d1db243cdf874c4933
+SHA1: 8e6a4fac7cd1b9ad262adf9827c0d32bf0b63953
+SHA256: a006b10da80469caecd7aecfdf26baacf1c5104e9d44bf0e4d8ea0c6d5cf9642
+SHA512: aa13c91a94fc99fc762a95188f3935f138a54f3d9f8f51ca21bea33f35ae48bea9f2ce093af559efa8440a6f89be562ee6a37c22c9e07617be2b46db566ad376
+Description: Microsoft Hypervisor for Linux (installer meta-package)
+ Downloads the Microsoft Hypervisor loader and firmware blobs
+ from packages.microsoft.com/azurelinux/3.0/prod/ at install
+ time and registers a systemd-boot entry that chainloads
+ HvLoader.efi from the ESP.
+ .
+ The Microsoft binaries are NOT redistributed by this package;
+ the postinst fetches them on the target machine, where the
+ user accepts Microsoft's license at install time.
+
