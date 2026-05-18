@@ -1,5 +1,25 @@
 Package: hyperv
 Architecture: amd64
+Version: 1.0.1-5.azl3.~ms1
+Priority: optional
+Section: admin
+Maintainer: hyperv-for-linux maintainers <noreply@example.invalid>
+Depends: systemd
+Recommends: linux-image-hyperv
+Filename: pool/main/h/hyperv/hyperv_1.0.1-5.azl3.~ms1_amd64.deb
+Size: 2664598
+MD5sum: b600d3671084a3aa99c9a3cc79c81284
+SHA1: fa6351f8ef4436247bc1ef1632f8142d13022324
+SHA256: 02a16b2c9ba9f6b9cdd215c1dd4763f22007a1f0c9962cfbcc6518f298a07fb8
+SHA512: a502ff6fd3cddb3b2b02afe10767e8051e555975a62d62f6755e70246797b6810053892aa540ed180126b7adb35ececf70da40632eac8c9f37a196c15d8448e6
+Description: Microsoft Hypervisor for Linux (repackaged from Azure Linux non-oss)
+ Ships the Microsoft Hypervisor loader, supporting payload, and
+ firmware blobs, repackaged from packages.microsoft.com/azurelinux/
+ 3.0/prod/non-oss/. The postinst installs hvloader.efi onto the
+ ESP and registers a systemd-boot entry that chainloads it.
+
+Package: hyperv
+Architecture: amd64
 Version: 27744.1000.2411011329.1-1.azl3.~ms1
 Priority: optional
 Section: admin
