@@ -1,28 +1,28 @@
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Mon, 25 May 2026 11:09:38 +0000
+Date: Mon, 01 Jun 2026 12:35:47 +0000
 Description: hyperv-for-linux apt repository
 Label: hyperv-for-linux
 Origin: hyperv-for-linux
 Suite: stable
 MD5Sum:
- e60422912286be673d992766d487e256              201 Release
- deaa4fb32442d2e6a5e407dee5da58cc             2044 main/binary-amd64/Packages
- a3c8b5c589d78756f3911a222cd12fac             1016 main/binary-amd64/Packages.gz
+ 0524a62b152e6a78de215beaecdfe4db              201 Release
+ 2a53ef4ddf5023799037f3dfa2d9e24b             2044 main/binary-amd64/Packages
+ fc95496cd59994e9d7c244913a33906b             1017 main/binary-amd64/Packages.gz
  52c376fd2c1e4608262b4cacb987ec4f              101 main/binary-amd64/Release
 SHA1:
- cc58a2f67a40f336410dc164dd184e588fb2f6f5              201 Release
- cd03cf79c4cf0168ea81aa58af8480e12df6e26a             2044 main/binary-amd64/Packages
- e27c99f298e55ed4719abb796d71b83931e754e8             1016 main/binary-amd64/Packages.gz
+ 54f6e48759ff18087e44f3cf6628b9cf02348721              201 Release
+ 88644b9abaf7a2e70c8e9413d44f6a6656dfa96d             2044 main/binary-amd64/Packages
+ c2a5acd146f908bcad2122f419a5b350d2b45c28             1017 main/binary-amd64/Packages.gz
  8d49a088c2aba71a7d04afe7bb067fdf119245e2              101 main/binary-amd64/Release
 SHA256:
- dfbaec1a2b1e3c125fcf199588dc4032257a12569442814e7d47abedeca5e23b              201 Release
- d5f98b02012ce962a97f4367d8ac562b49c738cf86d4a6b39c8062e84bb0b424             2044 main/binary-amd64/Packages
- 5ffc1a7fa01c42385285b9e3df7b377c0ea2d4af79bc134b3c509bc34096a27c             1016 main/binary-amd64/Packages.gz
+ 1b5b875cb33f1067b160a7f32b69bba3a8b607db7f1793dec0390f76023cb506              201 Release
+ 7c9263a5af13dea4396000466c9f0994a5bb3361cbdaa8ac793756c7366ce991             2044 main/binary-amd64/Packages
+ 3ef22591d4dfb2608a07a22b4153a2ad7b9557f188c4b293d936721945b5799b             1017 main/binary-amd64/Packages.gz
  b3ba5a860c63e1d1855d1f5fa90a603116182c67281f07f579d168c159287c59              101 main/binary-amd64/Release
 SHA512:
- 731403fbab699294207b2aa523c7450a8d6cd96a261abbf1b92af0003342d83ad998e2a554d165320de63d0b52dc14a6d48873bf81ba74217ea4901f04f52bbb              201 Release
- 9683944d3290ad817f8e770df65567e2a1c0fd6ec0ba77d25674746380c026ef61f6f7719ad08019cc7b2735e5dd1e94f74a59f06926262fc15753604e47758c             2044 main/binary-amd64/Packages
- 41da9cd94ff41dd556c0ece179d3097e37c540b28dce4923eac60396f4616948a9a09b090e7a065346f2966f0e3b2c5641f115f1efe37fb2e7752ae28ff98082             1016 main/binary-amd64/Packages.gz
+ c8925cbc6ec4d0f089410f3c0caf289b8946bb1126d47f376bdcea0c5793cd5a8f24b4f1ea121f1ffa9e570e1224d8185c7d28f7a1df86aa27b2e4b2574089e3              201 Release
+ 46953213d1aa05ae1e49867a74b1fe81a295809a83c4cb1ff2d3ea04aa3af8a34a244ba5d331f7ddc57a56bd975f17e0f3ad1d672bd52c1f4125ec922acdc704             2044 main/binary-amd64/Packages
+ 3e7c6acb173b40705a65d56b906129ce5a870ece1209fb7d44aab891ab00c0e573ba712ba7a91e5e32de4fb2ebd132ec5fc86a465cf887329838deaab154f1db             1017 main/binary-amd64/Packages.gz
  9ec19e8eee986da71101953e0d136f553fbe47b171cfe4be94319eced4fd1906a109093930315e408bb65a3b45584ba39c6c649af2e7fab30c244a436b959980              101 main/binary-amd64/Release
