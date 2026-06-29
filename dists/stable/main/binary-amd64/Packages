@@ -7,11 +7,11 @@ Maintainer: hyperv-for-linux maintainers <noreply@example.invalid>
 Depends: systemd
 Recommends: linux-image-hyperv
 Filename: pool/main/h/hyperv/hyperv_1.0.1-5.azl3.~ms1_amd64.deb
-Size: 2664822
-MD5sum: f849975a6673298732db56bed6cb3f88
-SHA1: 800576fbdb56a7595d46f8e0d82d643ddd5a8887
-SHA256: b6881483b053838cea0cf4d9880b87a033d725f989b5303944fa7c5e9e04150c
-SHA512: 5badcd4f4f6de0862e5a3d98253e13e203a8f6dca3131341c33303bee83aecc27da6bea85e065378e91166e978e51126ae03de78e401a742eee1a105998ac682
+Size: 2664758
+MD5sum: 3ebd908ab4405677bdbbf387601b5689
+SHA1: 206caa3739b2b89bc6b7436b659fae9e5cf616b2
+SHA256: 82d450fdca1bcae7739a898bc610ff70d952efd2f65dc5df3fb1c874dc79da56
+SHA512: ffb199feca328623eb6216f4bcc54e1e6d3773ef5b89f22ae37b7072c631c196c8f44e9eaa523cf1189516859c0d85f8d284198946c771876f4acc0679552576
 Description: Microsoft Hypervisor for Linux (repackaged from Azure Linux non-oss)
  Ships the Microsoft Hypervisor loader, supporting payload, and
  firmware blobs, repackaged from packages.microsoft.com/azurelinux/
